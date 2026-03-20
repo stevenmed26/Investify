@@ -28,3 +28,25 @@ type CreateHoldingRequest struct {
 	SharesOwned      float64  `json:"shares_owned"`
 	AverageCostBasis *float64 `json:"average_cost_basis"`
 }
+
+type CreateHoldingBySymbolRequest struct {
+	UserID           string   `json:"user_id"`
+	Symbol           string   `json:"symbol"`
+	SharesOwned      float64  `json:"shares_owned"`
+	AverageCostBasis *float64 `json:"average_cost_basis"`
+}
+
+type PredictionRequest struct {
+	Symbol      string `json:"symbol"`
+	HorizonDays int    `json:"horizon_days"`
+}
+
+type PredictionResponse struct {
+	Symbol             string         `json:"symbol"`
+	PredictedDirection string         `json:"predicted_direction"`
+	PredictedReturnPct float64        `json:"predicted_return_pct"`
+	ConfidenceScore    float64        `json:"confidence_score"`
+	Recommendation     string         `json:"recommendation"`
+	Explanation        map[string]any `json:"explanation"`
+	ModelVersion       string         `json:"model_version"`
+}
