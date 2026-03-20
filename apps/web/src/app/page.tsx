@@ -8,7 +8,7 @@ type Ticker = {
 
 async function getTickers() {
   try {
-    const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
+    const baseUrl = process.env.INTERNAL_API_BASE_URL ?? "http://api:8080";
     const res = await fetch(`${baseUrl}/api/v1/tickers`, { cache: "no-store" });
 
     if (!res.ok) {

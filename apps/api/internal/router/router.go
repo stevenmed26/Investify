@@ -6,6 +6,8 @@ import (
 	"investify/apps/api/internal/clients/mlclient"
 	"investify/apps/api/internal/config"
 	"investify/apps/api/internal/handlers"
+	"investify/apps/api/internal/marketdata"
+	"investify/apps/api/internal/services"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
@@ -23,6 +25,11 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 	}))
 
 	ml := mlclient.New(cfg.MLBaseURL)
+	priceProvider := marketdata.NewDevProvider()
+	priceIngestionService := &services.PriceIngestionService{
+		DB:       db,
+		Provider: priceProvider,
+	}
 
 	tickerHandler := handlers.TickerHandler{
 		DB:       db,
@@ -33,16 +40,24 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		DB: db,
 	}
 
+	priceHandler := handlers.PriceHandler{
+		DB:               db,
+		PriceIngestionSV: priceIngestionService,
+	}
+
 	r.Get("/health", handlers.Health)
 
 	r.Route("/api/v1", func(r chi.Router) {
 		r.Get("/tickers", tickerHandler.ListTickers)
 		r.Get("/tickers/{symbol}", tickerHandler.GetTickerBySymbol)
 		r.Get("/tickers/{symbol}/prediction", tickerHandler.GetPredictionBySymbol)
+		r.Get("/tickers/{symbol}/history", priceHandler.GetHistoricalPricesBySymbol)
 
 		r.Get("/holdings", holdingHandler.ListHoldings)
 		r.Post("/holdings", holdingHandler.CreateHolding)
 		r.Post("/holdings/by-symbol", holdingHandler.CreateHoldingBySymbol)
+
+		r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
 	})
 
 	return r

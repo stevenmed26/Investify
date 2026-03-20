@@ -50,3 +50,16 @@ type PredictionResponse struct {
 	Explanation        map[string]any `json:"explanation"`
 	ModelVersion       string         `json:"model_version"`
 }
+
+type HistoricalPrice struct {
+	ID            string  `json:"id,omitempty"`
+	TickerID      string  `json:"ticker_id,omitempty"`
+	TradingDate   string  `json:"trading_date"`
+	Open          float64 `json:"open"`
+	High          float64 `json:"high"`
+	Low           float64 `json:"low"`
+	Close         float64 `json:"close"`
+	AdjustedClose float64 `json:"adjusted_close"`
+	Volume        int64   `json:"volume"`
+	Source        string  `json:"source"`
+}
