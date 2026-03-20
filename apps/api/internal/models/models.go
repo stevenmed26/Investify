@@ -63,3 +63,17 @@ type HistoricalPrice struct {
 	Volume        int64   `json:"volume"`
 	Source        string  `json:"source"`
 }
+
+type TechnicalFeature struct {
+	TickerID      string   `json:"ticker_id,omitempty"`
+	TradingDate   string   `json:"trading_date"`
+	SMA20         *float64 `json:"sma_20,omitempty"`
+	SMA50         *float64 `json:"sma_50,omitempty"`
+	EMA12         *float64 `json:"ema_12,omitempty"`
+	EMA26         *float64 `json:"ema_26,omitempty"`
+	RSI14         *float64 `json:"rsi_14,omitempty"`
+	MACD          *float64 `json:"macd,omitempty"`
+	Momentum5D    *float64 `json:"momentum_5d,omitempty"`
+	Momentum20D   *float64 `json:"momentum_20d,omitempty"`
+	Volatility20D *float64 `json:"volatility_20d,omitempty"`
+}

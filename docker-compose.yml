@@ -45,8 +45,15 @@ services:
       - ./apps/ml-service:/app
     environment:
       ML_PORT: ${ML_PORT}
+      ML_DB_HOST: postgres
+      ML_DB_PORT: 5432
+      ML_DB_NAME: ${POSTGRES_DB}
+      ML_DB_USER: ${POSTGRES_USER}
+      ML_DB_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "${ML_PORT}:8000"
+    depends_on:
+      - postgres
 
   web:
     image: node:22

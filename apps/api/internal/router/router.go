@@ -26,9 +26,14 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 
 	ml := mlclient.New(cfg.MLBaseURL)
 	priceProvider := marketdata.NewDevProvider()
+
 	priceIngestionService := &services.PriceIngestionService{
 		DB:       db,
 		Provider: priceProvider,
+	}
+
+	featureService := &services.FeatureEngineeringService{
+		DB: db,
 	}
 
 	tickerHandler := handlers.TickerHandler{
@@ -45,6 +50,11 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		PriceIngestionSV: priceIngestionService,
 	}
 
+	featureHandler := handlers.FeatureHandler{
+		DB:        db,
+		FeatureSV: featureService,
+	}
+
 	r.Get("/health", handlers.Health)
 
 	r.Route("/api/v1", func(r chi.Router) {
@@ -52,12 +62,14 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		r.Get("/tickers/{symbol}", tickerHandler.GetTickerBySymbol)
 		r.Get("/tickers/{symbol}/prediction", tickerHandler.GetPredictionBySymbol)
 		r.Get("/tickers/{symbol}/history", priceHandler.GetHistoricalPricesBySymbol)
+		r.Get("/tickers/{symbol}/features", featureHandler.GetFeaturesBySymbol)
 
 		r.Get("/holdings", holdingHandler.ListHoldings)
 		r.Post("/holdings", holdingHandler.CreateHolding)
 		r.Post("/holdings/by-symbol", holdingHandler.CreateHoldingBySymbol)
 
 		r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
+		r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
 	})
 
 	return r

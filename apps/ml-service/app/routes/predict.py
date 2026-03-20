@@ -1,28 +1,150 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from app.schemas import PredictRequest, PredictResponse
+from app.db import get_connection
 
 router = APIRouter()
+
+
+def build_prediction_from_features(symbol: str) -> PredictResponse:
+    with get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    tf.trading_date,
+                    tf.sma_20,
+                    tf.sma_50,
+                    tf.ema_12,
+                    tf.ema_26,
+                    tf.rsi_14,
+                    tf.macd,
+                    tf.momentum_5d,
+                    tf.momentum_20d,
+                    tf.volatility_20d,
+                    hp.close
+                FROM technical_features tf
+                JOIN tickers t ON t.id = tf.ticker_id
+                LEFT JOIN historical_prices hp
+                  ON hp.ticker_id = tf.ticker_id
+                 AND hp.trading_date = tf.trading_date
+                WHERE t.symbol = %s
+                ORDER BY tf.trading_date DESC
+                LIMIT 1
+                """,
+                (symbol,),
+            )
+            row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="No technical features found for symbol")
+
+    score = 0.0
+    signals: list[str] = []
+    risk_factors: list[str] = []
+
+    close = row["close"]
+    sma_20 = row["sma_20"]
+    sma_50 = row["sma_50"]
+    ema_12 = row["ema_12"]
+    ema_26 = row["ema_26"]
+    rsi_14 = row["rsi_14"]
+    macd = row["macd"]
+    momentum_5d = row["momentum_5d"]
+    momentum_20d = row["momentum_20d"]
+    volatility_20d = row["volatility_20d"]
+
+    if close is not None and sma_20 is not None and close > sma_20:
+        score += 0.18
+        signals.append("Price is above 20-day moving average")
+    else:
+        score -= 0.18
+        risk_factors.append("Price is below 20-day moving average")
+
+    if close is not None and sma_50 is not None and close > sma_50:
+        score += 0.18
+        signals.append("Price is above 50-day moving average")
+    else:
+        score -= 0.18
+        risk_factors.append("Price is below 50-day moving average")
+
+    if ema_12 is not None and ema_26 is not None and ema_12 > ema_26:
+        score += 0.14
+        signals.append("EMA 12 is above EMA 26")
+    else:
+        score -= 0.14
+        risk_factors.append("EMA 12 is below EMA 26")
+
+    if macd is not None and macd > 0:
+        score += 0.12
+        signals.append("MACD is positive")
+    elif macd is not None:
+        score -= 0.12
+        risk_factors.append("MACD is negative")
+
+    if momentum_5d is not None and momentum_5d > 0:
+        score += 0.10
+        signals.append("Positive 5-day momentum")
+    elif momentum_5d is not None:
+        score -= 0.10
+        risk_factors.append("Negative 5-day momentum")
+
+    if momentum_20d is not None and momentum_20d > 0:
+        score += 0.12
+        signals.append("Positive 20-day momentum")
+    elif momentum_20d is not None:
+        score -= 0.12
+        risk_factors.append("Negative 20-day momentum")
+
+    if rsi_14 is not None:
+        if 45 <= rsi_14 <= 65:
+            score += 0.08
+            signals.append("RSI is in a stable bullish range")
+        elif rsi_14 > 75:
+            score -= 0.08
+            risk_factors.append("RSI suggests overbought conditions")
+        elif rsi_14 < 30:
+            risk_factors.append("RSI suggests oversold conditions")
+
+    if volatility_20d is not None:
+        if volatility_20d > 45:
+            score -= 0.10
+            risk_factors.append("20-day volatility is elevated")
+        elif volatility_20d < 25:
+            score += 0.05
+            signals.append("20-day volatility is relatively contained")
+
+    normalized = max(min((score + 1.0) / 2.0, 1.0), 0.0)
+
+    if score >= 0.25:
+        direction = "bullish"
+        recommendation = "buy" if normalized >= 0.65 else "wait"
+    elif score <= -0.25:
+        direction = "bearish"
+        recommendation = "sell" if normalized <= 0.35 else "wait"
+    else:
+        direction = "neutral"
+        recommendation = "wait"
+
+    confidence = normalized if direction == "bullish" else (1.0 - normalized if direction == "bearish" else 0.55)
+
+    predicted_return_pct = round(score * 4.0, 2)
+    confidence = round(max(min(confidence, 0.95), 0.51 if direction == "neutral" else 0.05), 4)
+
+    return PredictResponse(
+        symbol=symbol,
+        predicted_direction=direction,
+        predicted_return_pct=predicted_return_pct,
+        confidence_score=confidence,
+        recommendation=recommendation,
+        explanation={
+            "signals": signals,
+            "risk_factors": risk_factors,
+        },
+        model_version="rules-v0.2.0",
+    )
 
 
 @router.post("/predict", response_model=PredictResponse)
 def predict(payload: PredictRequest):
     symbol = payload.symbol.upper()
-
-    return PredictResponse(
-        symbol=symbol,
-        predicted_direction="bullish",
-        predicted_return_pct=2.14,
-        confidence_score=0.74,
-        recommendation="buy",
-        explanation={
-            "signals": [
-                "Price is above 20-day moving average",
-                "Positive 10-day momentum",
-                "RSI remains below overbought threshold",
-            ],
-            "risk_factors": [
-                "20-day volatility is elevated"
-            ],
-        },
-        model_version="v0.1.0",
-    )
+    return build_prediction_from_features(symbol)

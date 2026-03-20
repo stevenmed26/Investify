@@ -1,4 +1,6 @@
 import AddHoldingForm from "../../components/AddHoldingForm";
+import BackfillFeaturesButton from "../../components/BackfillFeaturesButton";
+import FeatureSnapshot from "../../components/FeatureSnapshot";
 import PriceChart from "../../components/PriceChart";
 import SeedHistoryButton from "../../components/SeedHistoryButton";
 import { notFound } from "next/navigation";
@@ -36,6 +38,19 @@ type HistoricalPrice = {
   adjusted_close: number;
   volume: number;
   source: string;
+};
+
+type FeatureRow = {
+  trading_date: string;
+  sma_20?: number | null;
+  sma_50?: number | null;
+  ema_12?: number | null;
+  ema_26?: number | null;
+  rsi_14?: number | null;
+  macd?: number | null;
+  momentum_5d?: number | null;
+  momentum_20d?: number | null;
+  volatility_20d?: number | null;
 };
 
 async function getTicker(symbol: string): Promise<Ticker | null> {
@@ -89,6 +104,24 @@ async function getHistory(symbol: string): Promise<HistoricalPrice[]> {
   }
 }
 
+async function getFeatures(symbol: string): Promise<FeatureRow[]> {
+  try {
+    const res = await fetch(
+      `${API_BASE_URL}/api/v1/tickers/${symbol}/features?limit=10`,
+      { cache: "no-store" }
+    );
+
+    if (!res.ok) {
+      return [];
+    }
+
+    const data = await res.json();
+    return data.features ?? [];
+  } catch {
+    return [];
+  }
+}
+
 function formatPercent(value: number) {
   return `${value.toFixed(2)}%`;
 }
@@ -105,15 +138,18 @@ export default async function TickerDetailPage({
   const { symbol } = await params;
   const normalizedSymbol = symbol.toUpperCase();
 
-  const [ticker, prediction, history] = await Promise.all([
+  const [ticker, prediction, history, features] = await Promise.all([
     getTicker(normalizedSymbol),
     getPrediction(normalizedSymbol),
     getHistory(normalizedSymbol),
+    getFeatures(normalizedSymbol),
   ]);
 
   if (!ticker) {
     notFound();
   }
+
+  const latestFeature = features.length > 0 ? features[0] : null;
 
   return (
     <main className="min-h-screen px-6 py-10">
@@ -130,14 +166,19 @@ export default async function TickerDetailPage({
 
         <div className="mt-10 grid gap-6">
           <section className="rounded-2xl border border-white/10 bg-white/5 p-6">
-            <div className="flex items-center justify-between gap-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
               <h2 className="text-2xl font-semibold">Historical Price Trend</h2>
               <SeedHistoryButton symbol={ticker.symbol} />
             </div>
 
             <div className="mt-6">
               {history.length > 0 ? (
-                <PriceChart data={history.map((p) => ({ trading_date: p.trading_date, close: p.close }))} />
+                <PriceChart
+                  data={history.map((p) => ({
+                    trading_date: p.trading_date,
+                    close: p.close,
+                  }))}
+                />
               ) : (
                 <p className="text-slate-300">
                   No historical prices found yet. Seed data for this ticker first.
@@ -148,7 +189,10 @@ export default async function TickerDetailPage({
 
           <div className="grid gap-6 lg:grid-cols-[1.4fr_0.9fr]">
             <section className="rounded-2xl border border-white/10 bg-white/5 p-6">
-              <h2 className="text-2xl font-semibold">Model Outlook</h2>
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <h2 className="text-2xl font-semibold">Model Outlook</h2>
+                <BackfillFeaturesButton symbol={ticker.symbol} />
+              </div>
 
               {prediction ? (
                 <div className="mt-6 grid gap-6">
@@ -212,14 +256,15 @@ export default async function TickerDetailPage({
 
             <aside className="grid gap-6">
               <AddHoldingForm symbol={ticker.symbol} />
+              <FeatureSnapshot latest={latestFeature} />
 
               <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-                <h3 className="text-lg font-semibold">Market Data Notes</h3>
+                <h3 className="text-lg font-semibold">Feature Pipeline Notes</h3>
                 <div className="mt-4 space-y-2 text-sm text-slate-300">
-                  <p>• Current history is seeded through a dev provider</p>
-                  <p>• Real provider can replace the dev provider later</p>
-                  <p>• Stored history is now available for feature engineering</p>
-                  <p>• Next step is technical indicator generation</p>
+                  <p>• Historical prices feed technical indicator generation</p>
+                  <p>• Features are persisted in Postgres for model reuse</p>
+                  <p>• Latest snapshot can now drive real prediction logic</p>
+                  <p>• Next step is making Python read these DB-backed features</p>
                 </div>
               </div>
             </aside>
