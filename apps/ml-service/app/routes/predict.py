@@ -1,11 +1,12 @@
 from fastapi import APIRouter, HTTPException
 from app.schemas import PredictRequest, PredictResponse
 from app.db import get_connection
+from app.services.predictor import predict_with_trained_model
 
 router = APIRouter()
 
 
-def build_prediction_from_features(symbol: str) -> PredictResponse:
+def build_rule_based_prediction(symbol: str) -> PredictResponse:
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -147,4 +148,9 @@ def build_prediction_from_features(symbol: str) -> PredictResponse:
 @router.post("/predict", response_model=PredictResponse)
 def predict(payload: PredictRequest):
     symbol = payload.symbol.upper()
-    return build_prediction_from_features(symbol)
+
+    trained = predict_with_trained_model(symbol)
+    if trained is not None:
+        return trained
+
+    return build_rule_based_prediction(symbol)

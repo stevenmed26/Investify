@@ -3,10 +3,12 @@ import BackfillFeaturesButton from "../../components/BackfillFeaturesButton";
 import FeatureSnapshot from "../../components/FeatureSnapshot";
 import PriceChart from "../../components/PriceChart";
 import SeedHistoryButton from "../../components/SeedHistoryButton";
+import TrainModelButton from "../../components/TrainModelButton";
 import { notFound } from "next/navigation";
 
 const API_BASE_URL =
   process.env.INTERNAL_API_BASE_URL ?? "http://api:8080";
+const ML_BASE_URL = "http://ml-service:8000";
 
 type Ticker = {
   id: string;
@@ -25,6 +27,11 @@ type Prediction = {
   explanation: {
     signals?: string[];
     risk_factors?: string[];
+    class_probabilities?: {
+      bullish?: number;
+      neutral?: number;
+      bearish?: number;
+    };
   };
   model_version: string;
 };
@@ -51,6 +58,22 @@ type FeatureRow = {
   momentum_5d?: number | null;
   momentum_20d?: number | null;
   volatility_20d?: number | null;
+};
+
+type CurrentModel = {
+  exists: boolean;
+  metadata?: {
+    version?: string;
+    model_type?: string;
+    symbol?: string;
+  };
+  metrics?: {
+    accuracy?: number;
+    rows?: number;
+    train_rows?: number;
+    test_rows?: number;
+  };
+  labels?: string[];
 };
 
 async function getTicker(symbol: string): Promise<Ticker | null> {
@@ -122,6 +145,22 @@ async function getFeatures(symbol: string): Promise<FeatureRow[]> {
   }
 }
 
+async function getCurrentModel(): Promise<CurrentModel | null> {
+  try {
+    const res = await fetch(`${ML_BASE_URL}/models/current`, {
+      cache: "no-store",
+    });
+
+    if (!res.ok) {
+      return null;
+    }
+
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
 function formatPercent(value: number) {
   return `${value.toFixed(2)}%`;
 }
@@ -138,11 +177,12 @@ export default async function TickerDetailPage({
   const { symbol } = await params;
   const normalizedSymbol = symbol.toUpperCase();
 
-  const [ticker, prediction, history, features] = await Promise.all([
+  const [ticker, prediction, history, features, currentModel] = await Promise.all([
     getTicker(normalizedSymbol),
     getPrediction(normalizedSymbol),
     getHistory(normalizedSymbol),
     getFeatures(normalizedSymbol),
+    getCurrentModel(),
   ]);
 
   if (!ticker) {
@@ -191,7 +231,10 @@ export default async function TickerDetailPage({
             <section className="rounded-2xl border border-white/10 bg-white/5 p-6">
               <div className="flex flex-wrap items-start justify-between gap-4">
                 <h2 className="text-2xl font-semibold">Model Outlook</h2>
-                <BackfillFeaturesButton symbol={ticker.symbol} />
+                <div className="flex flex-wrap items-start gap-3">
+                  <BackfillFeaturesButton symbol={ticker.symbol} />
+                  <TrainModelButton />
+                </div>
               </div>
 
               {prediction ? (
@@ -229,6 +272,29 @@ export default async function TickerDetailPage({
                     </div>
                   </div>
 
+                  {prediction.explanation?.class_probabilities ? (
+                    <div className="grid gap-4 sm:grid-cols-3">
+                      <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                        <div className="text-sm text-slate-400">Bullish Prob.</div>
+                        <div className="mt-2 text-xl font-semibold">
+                          {formatConfidence(prediction.explanation.class_probabilities.bullish ?? 0)}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                        <div className="text-sm text-slate-400">Neutral Prob.</div>
+                        <div className="mt-2 text-xl font-semibold">
+                          {formatConfidence(prediction.explanation.class_probabilities.neutral ?? 0)}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+                        <div className="text-sm text-slate-400">Bearish Prob.</div>
+                        <div className="mt-2 text-xl font-semibold">
+                          {formatConfidence(prediction.explanation.class_probabilities.bearish ?? 0)}
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
                   <div className="grid gap-4 sm:grid-cols-2">
                     <div className="rounded-xl border border-white/10 bg-black/20 p-4">
                       <h3 className="text-lg font-semibold">Signals</h3>
@@ -259,13 +325,27 @@ export default async function TickerDetailPage({
               <FeatureSnapshot latest={latestFeature} />
 
               <div className="rounded-2xl border border-white/10 bg-white/5 p-5">
-                <h3 className="text-lg font-semibold">Feature Pipeline Notes</h3>
-                <div className="mt-4 space-y-2 text-sm text-slate-300">
-                  <p>• Historical prices feed technical indicator generation</p>
-                  <p>• Features are persisted in Postgres for model reuse</p>
-                  <p>• Latest snapshot can now drive real prediction logic</p>
-                  <p>• Next step is making Python read these DB-backed features</p>
-                </div>
+                <h3 className="text-lg font-semibold">Current Model</h3>
+                {currentModel?.exists ? (
+                  <div className="mt-4 space-y-2 text-sm text-slate-300">
+                    <p>Version: {currentModel.metadata?.version}</p>
+                    <p>Type: {currentModel.metadata?.model_type}</p>
+                    <p>Scope: {currentModel.metadata?.symbol}</p>
+                    <p>
+                      Accuracy:{" "}
+                      {currentModel.metrics?.accuracy !== undefined
+                        ? `${(currentModel.metrics.accuracy * 100).toFixed(1)}%`
+                        : "—"}
+                    </p>
+                    <p>Rows: {currentModel.metrics?.rows ?? "—"}</p>
+                    <p>Train rows: {currentModel.metrics?.train_rows ?? "—"}</p>
+                    <p>Test rows: {currentModel.metrics?.test_rows ?? "—"}</p>
+                  </div>
+                ) : (
+                  <p className="mt-4 text-sm text-slate-300">
+                    No trained model found yet. Seed history, generate features, then train.
+                  </p>
+                )}
               </div>
             </aside>
           </div>

@@ -38,7 +38,7 @@ func (h PriceHandler) GetHistoricalPricesBySymbol(w http.ResponseWriter, r *http
 
 	rows, err := h.DB.Query(ctx, `
 		SELECT
-			hp.trading_date,
+			hp.trading_date::text,
 			hp.open,
 			hp.high,
 			hp.low,

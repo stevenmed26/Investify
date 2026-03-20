@@ -49,7 +49,7 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 	}
 
 	rows, err := s.DB.Query(ctx, `
-		SELECT trading_date, COALESCE(adjusted_close, close) AS close_price
+		SELECT trading_date::text, COALESCE(adjusted_close, close) AS close_price
 		FROM historical_prices
 		WHERE ticker_id = $1
 		ORDER BY trading_date ASC

@@ -60,7 +60,7 @@ func (h FeatureHandler) GetFeaturesBySymbol(w http.ResponseWriter, r *http.Reque
 
 	rows, err := h.DB.Query(ctx, `
 		SELECT
-			tf.trading_date,
+			tf.trading_date::text,
 			tf.sma_20,
 			tf.sma_50,
 			tf.ema_12,
