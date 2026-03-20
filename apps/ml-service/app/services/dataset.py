@@ -18,9 +18,42 @@ FEATURE_COLUMNS = [
 ]
 
 
+def _coerce_numeric_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    for col in columns:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def _build_labels(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    valid_returns = df["forward_return_pct"].dropna()
+    if valid_returns.empty:
+        return df.iloc[0:0].copy()
+
+    lower = float(valid_returns.quantile(0.33))
+    upper = float(valid_returns.quantile(0.67))
+
+    if lower >= upper:
+        lower = -0.5
+        upper = 0.5
+
+    def label_fn(x: float) -> str:
+        if x >= upper:
+            return "bullish"
+        if x <= lower:
+            return "bearish"
+        return "neutral"
+
+    df["label"] = df["forward_return_pct"].apply(label_fn)
+    return df
+
+
 def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) -> pd.DataFrame:
     where_clause = ""
-    params: list = [horizon_days]
+    params: list[object] = [horizon_days]
 
     if symbol:
         where_clause = "WHERE t.symbol = %s"
@@ -78,30 +111,47 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
     if df.empty:
         return df
 
-    df = df.dropna(subset=["future_close"])
+    numeric_columns = [
+        "sma_20",
+        "sma_50",
+        "ema_12",
+        "ema_26",
+        "rsi_14",
+        "macd",
+        "momentum_5d",
+        "momentum_20d",
+        "volatility_20d",
+        "close",
+        "future_close",
+    ]
+    df = _coerce_numeric_columns(df, numeric_columns)
 
-    # Derived relative features
+    if "trading_date" in df.columns:
+        df["trading_date"] = pd.to_datetime(df["trading_date"], errors="coerce")
+
+    df = df.dropna(subset=["close", "future_close"]).copy()
+
     df["price_vs_sma20"] = (df["close"] / df["sma_20"]) - 1.0
     df["price_vs_sma50"] = (df["close"] / df["sma_50"]) - 1.0
     df["ema_gap"] = df["ema_12"] - df["ema_26"]
-
-    # 5-day forward return in percent
     df["forward_return_pct"] = ((df["future_close"] / df["close"]) - 1.0) * 100.0
 
-    # Labels
-    def label_fn(x: float) -> str:
-        if x > 2.0:
-            return "bullish"
-        if x < -2.0:
-            return "bearish"
-        return "neutral"
-
-    df["label"] = df["forward_return_pct"].apply(label_fn)
-
     feature_set = FEATURE_COLUMNS + ["price_vs_sma20", "price_vs_sma50", "ema_gap"]
-    df = df.dropna(subset=feature_set)
+    df = df.dropna(subset=feature_set).reset_index(drop=True)
 
-    return df
+    if df.empty:
+        return df
+
+    df = _build_labels(df)
+
+    if "label" not in df.columns:
+        return df.iloc[0:0].copy()
+
+    label_counts = df["label"].value_counts(dropna=False)
+    if len(label_counts.index) < 2:
+        return df.iloc[0:0].copy()
+
+    return df.reset_index(drop=True)
 
 
 def load_latest_feature_row(symbol: str) -> pd.DataFrame:
@@ -136,8 +186,26 @@ def load_latest_feature_row(symbol: str) -> pd.DataFrame:
     if df.empty:
         return df
 
+    numeric_columns = [
+        "sma_20",
+        "sma_50",
+        "ema_12",
+        "ema_26",
+        "rsi_14",
+        "macd",
+        "momentum_5d",
+        "momentum_20d",
+        "volatility_20d",
+        "close",
+    ]
+    df = _coerce_numeric_columns(df, numeric_columns)
+
+    if "trading_date" in df.columns:
+        df["trading_date"] = pd.to_datetime(df["trading_date"], errors="coerce")
+
     df["price_vs_sma20"] = (df["close"] / df["sma_20"]) - 1.0
     df["price_vs_sma50"] = (df["close"] / df["sma_50"]) - 1.0
     df["ema_gap"] = df["ema_12"] - df["ema_26"]
 
+    df = df.dropna().reset_index(drop=True)
     return df

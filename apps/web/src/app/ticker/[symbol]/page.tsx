@@ -233,7 +233,7 @@ export default async function TickerDetailPage({
                 <h2 className="text-2xl font-semibold">Model Outlook</h2>
                 <div className="flex flex-wrap items-start gap-3">
                   <BackfillFeaturesButton symbol={ticker.symbol} />
-                  <TrainModelButton />
+                  <TrainModelButton symbol={ ticker.symbol } />
                 </div>
               </div>
 

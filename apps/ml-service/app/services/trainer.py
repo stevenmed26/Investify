@@ -42,21 +42,52 @@ class TrainResult:
 
 def train_model(symbol: str | None = None, horizon_days: int = 5) -> TrainResult:
     df = load_training_dataframe(symbol=symbol, horizon_days=horizon_days)
+
     if df.empty:
-        raise ValueError("No training data available. Seed history and generate features first.")
+        raise ValueError(
+            "No training data available after preprocessing. Seed more history, backfill features, and try again."
+        )
+
+    missing_features = [col for col in MODEL_FEATURES if col not in df.columns]
+    if missing_features:
+        raise ValueError(f"Missing required feature columns: {missing_features}")
+
+    if "label" not in df.columns:
+        raise ValueError("Missing required label column: label")
 
     X = df[MODEL_FEATURES].copy()
     y = df["label"].copy()
 
-    # Time-based split
+    if len(df) < 20:
+        raise ValueError(f"Not enough usable rows to train. Rows available: {len(df)}")
+
+    all_labels = sorted(list(np.unique(y)))
+    if len(all_labels) < 2:
+        raise ValueError(
+            f"Need at least 2 label classes to train, but found {len(all_labels)}: {all_labels}"
+        )
+
     split_idx = int(len(df) * 0.8)
     if split_idx <= 0 or split_idx >= len(df):
-        raise ValueError("Not enough rows to split training and test sets.")
+        raise ValueError(
+            f"Not enough rows to split training and test sets. Total usable rows: {len(df)}"
+        )
 
     X_train = X.iloc[:split_idx]
     y_train = y.iloc[:split_idx]
     X_test = X.iloc[split_idx:]
     y_test = y.iloc[split_idx:]
+
+    train_labels = sorted(list(np.unique(y_train)))
+    test_labels = sorted(list(np.unique(y_test)))
+
+    if len(train_labels) < 2:
+        raise ValueError(
+            f"Training split has only one class: {train_labels}. Seed more history or adjust labeling thresholds."
+        )
+
+    if len(test_labels) < 1:
+        raise ValueError("Test split is empty.")
 
     numeric_transformer = Pipeline(
         steps=[
