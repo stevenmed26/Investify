@@ -1,2 +1,15 @@
 # Investify
-Webapp to ingest historical price data, generate trend signals from price history and then suggest buy/sell/wait recommendation with an explainable confidence score
+
+Investify is a full-stack stock analysis platform built with:
+
+- Next.js frontend
+- Go API
+- Python ML service
+- PostgreSQL
+
+## Local startup
+
+1. Copy environment file
+
+```bash
+cp .env.example .env

@@ -1,0 +1,66 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: investify-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    ports:
+      - "${POSTGRES_PORT}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/migrations:/docker-entrypoint-initdb.d
+
+  api:
+    image: golang:1.24
+    container_name: investify-api
+    working_dir: /app
+    command: sh -c "go mod tidy && go run ./cmd/server"
+    volumes:
+      - ./apps/api:/app
+    environment:
+      API_PORT: ${API_PORT}
+      API_DB_HOST: ${API_DB_HOST}
+      API_DB_PORT: ${API_DB_PORT}
+      API_DB_NAME: ${API_DB_NAME}
+      API_DB_USER: ${API_DB_USER}
+      API_DB_PASSWORD: ${API_DB_PASSWORD}
+      API_ML_BASE_URL: ${API_ML_BASE_URL}
+    ports:
+      - "${API_PORT}:8080"
+    depends_on:
+      - postgres
+      - ml-service
+
+  ml-service:
+    image: python:3.12-slim
+    container_name: investify-ml
+    working_dir: /app
+    command: sh -c "pip install --no-cache-dir -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    volumes:
+      - ./apps/ml-service:/app
+    environment:
+      ML_PORT: ${ML_PORT}
+    ports:
+      - "${ML_PORT}:8000"
+
+  web:
+    image: node:22
+    container_name: investify-web
+    working_dir: /app
+    command: sh -c "npm install && npm run dev"
+    volumes:
+      - ./apps/web:/app
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+    ports:
+      - "3000:3000"
+    depends_on:
+      - api
+
+volumes:
+  postgres_data:
