@@ -218,6 +218,12 @@ export default async function TickerDetailPage({
                     trading_date: p.trading_date,
                     close: p.close,
                   }))}
+                  prediction={prediction ? {
+                    predicted_direction: prediction.predicted_direction,
+                    predicted_return_pct: prediction.predicted_return_pct,
+                    confidence_score: prediction.confidence_score,
+                    horizon_days: 5,
+                  } : null}
                 />
               ) : (
                 <p className="text-slate-300">

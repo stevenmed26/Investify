@@ -7,7 +7,9 @@ from app.db import get_connection
 
 logger = logging.getLogger(__name__)
 
-FEATURE_COLUMNS = [
+# Raw DB columns fetched for training — includes price-level indicators
+# needed to compute derived ratios, but NOT used directly as model features.
+RAW_INDICATOR_COLUMNS = [
     "sma_20",
     "sma_50",
     "ema_12",
@@ -17,11 +19,31 @@ FEATURE_COLUMNS = [
     "momentum_5d",
     "momentum_20d",
     "volatility_20d",
-    # Relative price position — replaces raw `close` which leaks absolute price
-    # scale into the model and has no predictive meaning across tickers.
+]
+
+# The actual model feature set — every column here must be dimensionless
+# (scale-invariant across tickers) so that a StandardScaler fitted on
+# mixed AAPL/NVDA training data produces meaningful z-scores at inference.
+#
+# Removed from previous version:
+#   sma_20, sma_50, ema_12, ema_26 — raw dollar prices (5-100x range across tickers)
+#   macd (raw)    — ema_12 - ema_26 in dollars, same scale problem
+#   ema_gap       — duplicate of macd, also dollar-denominated
+#
+# What remains or was added:
+#   price_vs_sma20/50  — (close/sma) - 1, dimensionless ratio
+#   macd_pct           — macd / close, normalises MACD to % of price
+#   rsi_14             — already 0-100 bounded, fine
+#   momentum_5d/20d    — ((price/prev)-1)*100, already a % return
+#   volatility_20d     — annualised % vol, already dimensionless
+ALL_MODEL_FEATURES = [
+    "rsi_14",
+    "momentum_5d",
+    "momentum_20d",
+    "volatility_20d",
     "price_vs_sma20",
     "price_vs_sma50",
-    "ema_gap",
+    "macd_pct",
 ]
 
 
@@ -32,14 +54,14 @@ def _coerce_numeric_columns(df: pd.DataFrame, columns: list[str]) -> pd.DataFram
     return df
 
 
-def _build_labels_per_ticker(df: pd.DataFrame) -> pd.DataFrame:
+def build_labels_for_split(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute forward-return quantile thresholds independently per ticker, then
-    assign bullish/neutral/bearish labels before concatenating.
+    Assign bullish/neutral/bearish labels using quantile thresholds computed
+    ONLY on the rows in `df`.
 
-    Previously labels were computed across all tickers combined, which caused
-    data leakage: a volatile stock's large swings would shift the thresholds so
-    that a perfectly normal move in a low-volatility stock got mislabeled.
+    Must be called separately on each split after _chronological_split() —
+    never on the full dataset, which would leak test return distribution
+    into training labels.
     """
     if df.empty:
         return df
@@ -51,7 +73,7 @@ def _build_labels_per_ticker(df: pd.DataFrame) -> pd.DataFrame:
         valid = group["forward_return_pct"].dropna()
 
         if valid.empty:
-            logger.warning("[dataset] skipping symbol=%s — no valid forward returns", symbol)
+            logger.warning("[dataset] skipping label build symbol=%s — no valid forward returns", symbol)
             continue
 
         lower = float(valid.quantile(0.33))
@@ -78,13 +100,9 @@ def _build_labels_per_ticker(df: pd.DataFrame) -> pd.DataFrame:
         logger.debug(
             "[dataset] labeled symbol=%s rows=%d bullish=%d neutral=%d bearish=%d "
             "lower=%.4f upper=%.4f",
-            symbol,
-            len(group),
-            counts.get("bullish", 0),
-            counts.get("neutral", 0),
-            counts.get("bearish", 0),
-            lower,
-            upper,
+            symbol, len(group),
+            counts.get("bullish", 0), counts.get("neutral", 0), counts.get("bearish", 0),
+            lower, upper,
         )
 
         labeled_chunks.append(group)
@@ -97,10 +115,7 @@ def _build_labels_per_ticker(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _cursor_to_df(cur) -> pd.DataFrame:
-    """
-    Build a DataFrame from a psycopg3 cursor result without pd.read_sql.
-    pd.read_sql requires a SQLAlchemy connection; psycopg3 is not supported.
-    """
+    """Build a DataFrame from a psycopg3 cursor without pd.read_sql."""
     rows = cur.fetchall()
     if not rows:
         return pd.DataFrame()
@@ -112,14 +127,14 @@ def _cursor_to_df(cur) -> pd.DataFrame:
 
 def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) -> pd.DataFrame:
     """
-    Load all labeled training rows from the database.
+    Load raw feature rows with forward returns. Labels are NOT assigned here.
 
-    When symbol is None (the default and recommended path), data from ALL tickers
-    is loaded. This is the correct way to train — a model that sees AAPL, MSFT,
-    GOOGL, AMZN, and NVDA together learns generalizable technical patterns rather
-    than overfitting to a single stock's price history.
+    Labeling is deferred to trainer.py so quantile thresholds are computed
+    on the train split only — never on the full dataset.
 
-    The symbol filter is kept for debugging / experimentation only.
+    Returns a DataFrame with raw indicators + close + future_close +
+    forward_return_pct. No `label` column. The trainer adds labels after
+    splitting and computing derived features.
     """
     scope = symbol.upper() if symbol else "ALL"
     logger.info("[dataset] load_training_dataframe scope=%s horizon_days=%d", scope, horizon_days)
@@ -137,14 +152,10 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
                 t.symbol,
                 tf.ticker_id,
                 tf.trading_date,
-                tf.sma_20,
-                tf.sma_50,
-                tf.ema_12,
-                tf.ema_26,
-                tf.rsi_14,
-                tf.macd,
-                tf.momentum_5d,
-                tf.momentum_20d,
+                tf.sma_20, tf.sma_50,
+                tf.ema_12, tf.ema_26,
+                tf.rsi_14, tf.macd,
+                tf.momentum_5d, tf.momentum_20d,
                 tf.volatility_20d,
                 hp.close,
                 LEAD(hp.close, %s) OVER (
@@ -152,27 +163,18 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
                     ORDER BY tf.trading_date
                 ) AS future_close
             FROM technical_features tf
-            JOIN tickers t
-              ON t.id = tf.ticker_id
+            JOIN tickers t ON t.id = tf.ticker_id
             JOIN historical_prices hp
               ON hp.ticker_id = tf.ticker_id
              AND hp.trading_date = tf.trading_date
             {where_clause}
         )
         SELECT
-            symbol,
-            trading_date,
-            sma_20,
-            sma_50,
-            ema_12,
-            ema_26,
-            rsi_14,
-            macd,
-            momentum_5d,
-            momentum_20d,
-            volatility_20d,
-            close,
-            future_close
+            symbol, trading_date,
+            sma_20, sma_50, ema_12, ema_26,
+            rsi_14, macd,
+            momentum_5d, momentum_20d, volatility_20d,
+            close, future_close
         FROM feature_prices
         ORDER BY symbol, trading_date
     """
@@ -188,65 +190,57 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
         logger.warning("[dataset] no rows returned from DB scope=%s", scope)
         return df
 
-    numeric_columns = [
-        "sma_20", "sma_50", "ema_12", "ema_26", "rsi_14", "macd",
-        "momentum_5d", "momentum_20d", "volatility_20d", "close", "future_close",
-    ]
-    df = _coerce_numeric_columns(df, numeric_columns)
+    numeric_cols = RAW_INDICATOR_COLUMNS + ["close", "future_close"]
+    df = _coerce_numeric_columns(df, numeric_cols)
 
     if "trading_date" in df.columns:
         df["trading_date"] = pd.to_datetime(df["trading_date"], errors="coerce")
 
-    before_drop = len(df)
+    before = len(df)
     df = df.dropna(subset=["close", "future_close"]).copy()
-    logger.debug(
-        "[dataset] dropped rows missing close/future_close before=%d after=%d",
-        before_drop, len(df),
-    )
+    logger.debug("[dataset] dropped rows missing close/future_close before=%d after=%d", before, len(df))
 
-    df["price_vs_sma20"] = (df["close"] / df["sma_20"]) - 1.0
-    df["price_vs_sma50"] = (df["close"] / df["sma_50"]) - 1.0
-    df["ema_gap"] = df["ema_12"] - df["ema_26"]
     df["forward_return_pct"] = ((df["future_close"] / df["close"]) - 1.0) * 100.0
 
-    before_drop = len(df)
-    df = df.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
-    logger.debug(
-        "[dataset] dropped rows with null features before=%d after=%d",
-        before_drop, len(df),
-    )
+    # Drop rows where essential raw indicators are null — these can't produce
+    # valid derived features. Use only the indicators that feed into model features.
+    required_raw = ["rsi_14", "momentum_5d", "momentum_20d", "volatility_20d",
+                    "sma_20", "sma_50", "macd", "close"]
+    before = len(df)
+    df = df.dropna(subset=required_raw).reset_index(drop=True)
+    logger.debug("[dataset] dropped rows with null indicators before=%d after=%d", before, len(df))
 
     if df.empty:
-        logger.warning("[dataset] no rows remain after feature null-drop scope=%s", scope)
+        logger.warning("[dataset] no rows remain after null-drop scope=%s", scope)
         return df
-
-    df = _build_labels_per_ticker(df)
-
-    if "label" not in df.columns or df.empty:
-        logger.warning("[dataset] labeling produced no rows scope=%s", scope)
-        return df.iloc[0:0].copy()
-
-    label_counts = df["label"].value_counts(dropna=False).to_dict()
-    if len(label_counts) < 2:
-        logger.warning(
-            "[dataset] only one label class present=%s scope=%s — not enough variance to train",
-            label_counts, scope,
-        )
-        return df.iloc[0:0].copy()
 
     tickers_in_df = df["symbol"].nunique() if "symbol" in df.columns else "?"
     logger.info(
-        "[dataset] final training dataframe scope=%s tickers=%s rows=%d "
-        "bullish=%d neutral=%d bearish=%d",
-        scope,
-        tickers_in_df,
-        len(df),
-        label_counts.get("bullish", 0),
-        label_counts.get("neutral", 0),
-        label_counts.get("bearish", 0),
+        "[dataset] training dataframe ready scope=%s tickers=%s rows=%d "
+        "(labels + derived features assigned after split in trainer)",
+        scope, tickers_in_df, len(df),
     )
 
     return df.reset_index(drop=True)
+
+
+def add_derived_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Compute all dimensionless derived features from raw indicator values.
+
+    All outputs are scale-invariant — they have the same meaning whether
+    the stock price is $10 or $1000, so a StandardScaler fitted on mixed
+    tickers produces valid z-scores at inference time.
+
+    price_vs_sma20/50 : how far price is above/below its moving average, as a fraction
+    macd_pct          : MACD normalised by current price — removes dollar-scale effect
+    """
+    df = df.copy()
+    df["price_vs_sma20"] = (df["close"] / df["sma_20"]) - 1.0
+    df["price_vs_sma50"] = (df["close"] / df["sma_50"]) - 1.0
+    # Normalise MACD by close price to make it dimensionless across all tickers
+    df["macd_pct"] = df["macd"] / df["close"]
+    return df
 
 
 def load_latest_feature_row(symbol: str) -> pd.DataFrame:
@@ -257,19 +251,14 @@ def load_latest_feature_row(symbol: str) -> pd.DataFrame:
         SELECT
             t.symbol,
             tf.trading_date,
-            tf.sma_20,
-            tf.sma_50,
-            tf.ema_12,
-            tf.ema_26,
-            tf.rsi_14,
-            tf.macd,
-            tf.momentum_5d,
-            tf.momentum_20d,
+            tf.sma_20, tf.sma_50,
+            tf.ema_12, tf.ema_26,
+            tf.rsi_14, tf.macd,
+            tf.momentum_5d, tf.momentum_20d,
             tf.volatility_20d,
             hp.close
         FROM technical_features tf
-        JOIN tickers t
-          ON t.id = tf.ticker_id
+        JOIN tickers t ON t.id = tf.ticker_id
         JOIN historical_prices hp
           ON hp.ticker_id = tf.ticker_id
          AND hp.trading_date = tf.trading_date
@@ -287,26 +276,21 @@ def load_latest_feature_row(symbol: str) -> pd.DataFrame:
         logger.warning("[dataset] no feature row found symbol=%s", symbol)
         return df
 
-    numeric_columns = [
-        "sma_20", "sma_50", "ema_12", "ema_26", "rsi_14", "macd",
-        "momentum_5d", "momentum_20d", "volatility_20d", "close",
-    ]
-    df = _coerce_numeric_columns(df, numeric_columns)
+    numeric_cols = RAW_INDICATOR_COLUMNS + ["close"]
+    df = _coerce_numeric_columns(df, numeric_cols)
 
     if "trading_date" in df.columns:
         df["trading_date"] = pd.to_datetime(df["trading_date"], errors="coerce")
 
-    df["price_vs_sma20"] = (df["close"] / df["sma_20"]) - 1.0
-    df["price_vs_sma50"] = (df["close"] / df["sma_50"]) - 1.0
-    df["ema_gap"] = df["ema_12"] - df["ema_26"]
+    df = add_derived_features(df)
 
     before = len(df)
-    df = df.dropna().reset_index(drop=True)
+    df = df.dropna(subset=ALL_MODEL_FEATURES).reset_index(drop=True)
 
     if df.empty:
         logger.warning(
             "[dataset] feature row for symbol=%s dropped after null-check "
-            "(missing indicator values — backfill features first)",
+            "(some indicators missing — backfill features first)",
             symbol,
         )
         return df
