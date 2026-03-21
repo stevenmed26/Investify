@@ -20,12 +20,13 @@ func hashSeed(symbol string) float64 {
 	return float64(h.Sum32()%5000) / 100.0
 }
 
-func (p *DevProvider) FetchDailyHistory(ctx context.Context, symbol string, days int) ([]DailyPrice, error) {
+func (p *DevProvider) FetchDailyHistory(ctx context.Context, symbol string, days int, apiKey string) ([]DailyPrice, error) {
 	if days <= 0 {
 		days = 180
 	}
 
 	_ = ctx
+	_ = apiKey
 
 	base := 100.0 + hashSeed(symbol)
 	now := time.Now().UTC()

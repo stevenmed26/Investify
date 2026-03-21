@@ -14,5 +14,5 @@ type DailyPrice struct {
 }
 
 type Provider interface {
-	FetchDailyHistory(ctx context.Context, symbol string, days int) ([]DailyPrice, error)
+	FetchDailyHistory(ctx context.Context, symbol string, days int, apiKey string) ([]DailyPrice, error)
 }

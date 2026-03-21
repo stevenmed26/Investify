@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"investify/apps/api/internal/middleware"
 	"investify/apps/api/internal/models"
 	"investify/apps/api/internal/services"
 
@@ -77,7 +78,6 @@ func (h PriceHandler) GetHistoricalPricesBySymbol(w http.ResponseWriter, r *http
 		prices = append(prices, item)
 	}
 
-	// Reverse to ascending order for charting
 	for i, j := 0, len(prices)-1; i < j; i, j = i+1, j-1 {
 		prices[i], prices[j] = prices[j], prices[i]
 	}
@@ -89,6 +89,12 @@ func (h PriceHandler) GetHistoricalPricesBySymbol(w http.ResponseWriter, r *http
 }
 
 func (h PriceHandler) IngestHistoricalPricesBySymbol(w http.ResponseWriter, r *http.Request) {
+	user, ok := middleware.GetAuthUser(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
 	symbol := strings.ToUpper(strings.TrimSpace(chi.URLParam(r, "symbol")))
 	if symbol == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "symbol is required"})
@@ -105,7 +111,7 @@ func (h PriceHandler) IngestHistoricalPricesBySymbol(w http.ResponseWriter, r *h
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
 
-	count, err := h.PriceIngestionSV.IngestBySymbol(ctx, symbol, days)
+	count, err := h.PriceIngestionSV.IngestBySymbolForUser(ctx, user.UserID, symbol, days)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

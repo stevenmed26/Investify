@@ -20,16 +20,22 @@ export default function BackfillFeaturesButton({ symbol }: Props) {
     try {
       const res = await fetch(
         `${API_BASE_URL}/api/v1/admin/features/${symbol}/backfill`,
-        { method: "POST" }
+        {
+          method: "POST",
+          credentials: "include",
+        }
       );
-      const data = await res.json();
+
+      const data = await res.json().catch(() => null);
 
       if (!res.ok) {
-        setStatus(data.error ?? "Feature backfill failed");
+        setStatus(data?.error ?? data?.detail ?? "Unauthorized");
         return;
       }
 
-      setStatus(`Backfilled ${data.rows_processed} feature rows for ${symbol}. Refresh the page.`);
+      setStatus(
+        `Generated ${data.rows_processed ?? data.rows ?? 0} feature rows for ${symbol}. Refresh the page.`
+      );
     } catch {
       setStatus("Request failed");
     } finally {

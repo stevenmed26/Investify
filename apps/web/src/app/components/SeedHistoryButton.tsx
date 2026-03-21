@@ -20,12 +20,16 @@ export default function SeedHistoryButton({ symbol }: Props) {
     try {
       const res = await fetch(
         `${API_BASE_URL}/api/v1/admin/ingest/${symbol}/history?days=240`,
-        { method: "POST" }
+        {
+          method: "POST",
+          credentials: "include",
+        }
       );
-      const data = await res.json();
+
+      const data = await res.json().catch(() => null);
 
       if (!res.ok) {
-        setStatus(data.error ?? "Seed failed");
+        setStatus(data?.error ?? data?.detail ?? "Unauthorized");
         return;
       }
 
