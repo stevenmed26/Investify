@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -23,6 +24,11 @@ type AuthHandler struct {
 type authRequest struct {
 	Email    string `json:"email"`
 	Password string `json:"password"`
+}
+
+func isSecureEnv() bool {
+	env := os.Getenv("APP_ENV")
+	return env == "production" || env == "prod"
 }
 
 func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
@@ -70,7 +76,7 @@ func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   false,
+		Secure:   isSecureEnv(), // FIX 6
 		MaxAge:   7 * 24 * 3600,
 	})
 
@@ -127,7 +133,7 @@ func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   false,
+		Secure:   isSecureEnv(), // FIX 6
 		MaxAge:   7 * 24 * 3600,
 	})
 
@@ -146,7 +152,7 @@ func (h AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   false,
+		Secure:   isSecureEnv(), // FIX 6
 		MaxAge:   -1,
 	})
 

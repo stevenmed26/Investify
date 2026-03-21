@@ -1,5 +1,6 @@
 import "./globals.css";
 import type { Metadata } from "next";
+import { HamburgerMenu } from "./components/Hamburgermenu";
 
 export const metadata: Metadata = {
   title: "Investify",
@@ -11,7 +12,16 @@ export default function RootLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <header className="investify-navbar">
+          <a href="/" className="investify-navbar-brand">
+            Investify
+          </a>
+          <HamburgerMenu />
+        </header>
+        <div className="investify-navbar-spacer" />
+        {children}
+      </body>
     </html>
   );
 }

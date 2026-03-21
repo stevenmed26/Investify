@@ -2,11 +2,32 @@
 
 import { useState } from "react";
 
-const ML_BASE_URL =
-  process.env.NEXT_PUBLIC_ML_BASE_URL ?? "http://localhost:8000";
+// FIX: The original used NEXT_PUBLIC_ML_BASE_URL pointing directly at the
+// ml-service container (http://localhost:8000). That host is only reachable
+// inside Docker — the browser cannot connect to it. The train endpoint must be
+// called through the Go API, which IS reachable from the browser.
+//
+// The Go router already has the ML client wired; we just need a proxy route.
+// Until that proxy route exists, we call the ML service via the Next.js API
+// route below which runs server-side and CAN reach ml-service:8000.
+//
+// Drop-in approach: call /api/train (a Next.js API route we create) which
+// proxies to the internal ML service. No CORS issues, no Docker networking issues.
+
+const API_BASE_URL =
+  process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
 type Props = {
   symbol?: string;
+};
+
+type TrainResult = {
+  rows: number;
+  train_rows: number;
+  test_rows: number;
+  accuracy: number;
+  labels: string[];
+  model_path: string;
 };
 
 export default function TrainModelButton({ symbol }: Props) {
@@ -24,11 +45,14 @@ export default function TrainModelButton({ symbol }: Props) {
       }
       query.set("horizon_days", "5");
 
-      const res = await fetch(`${ML_BASE_URL}/train?${query.toString()}`, {
+      // Route through the Next.js proxy API route instead of hitting the
+      // ML container directly from the browser.
+      const res = await fetch(`/api/train?${query.toString()}`, {
         method: "POST",
+        credentials: "include",
       });
 
-      let data: any = null;
+      let data: TrainResult | { detail?: string; error?: string } | null = null;
       try {
         data = await res.json();
       } catch {
@@ -36,20 +60,26 @@ export default function TrainModelButton({ symbol }: Props) {
       }
 
       if (!res.ok) {
-        setStatus(
-          data?.detail ??
-            data?.error ??
-            `Training failed with status ${res.status}`
-        );
+        const errData = data as { detail?: string; error?: string } | null;
+        if (res.status === 401) {
+          setStatus("Sign in first to train the model.");
+        } else {
+          setStatus(
+            errData?.detail ??
+              errData?.error ??
+              `Training failed (${res.status})`
+          );
+        }
         return;
       }
 
+      const result = data as TrainResult;
       setStatus(
-        `Trained model. Accuracy ${(data.accuracy * 100).toFixed(1)}% on ${data.test_rows} test rows. Refresh the page.`
+        `Trained. Accuracy ${(result.accuracy * 100).toFixed(1)}% on ${result.test_rows} test rows. Refresh to see updated predictions.`
       );
     } catch (err) {
       console.error(err);
-      setStatus("Training request failed. Check browser console for CORS/network details.");
+      setStatus("Training request failed.");
     } finally {
       setLoading(false);
     }

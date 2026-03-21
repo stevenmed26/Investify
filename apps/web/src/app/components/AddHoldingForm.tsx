@@ -5,9 +5,6 @@ import { useState } from "react";
 const API_BASE_URL =
   process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
-// Temporary until auth exists.
-const DEMO_USER_ID = "11111111-1111-1111-1111-111111111111";
-
 type Props = {
   symbol: string;
 };
@@ -24,13 +21,14 @@ export default function AddHoldingForm({ symbol }: Props) {
     setStatus(null);
 
     try {
+      // FIX: The original sent a hardcoded DEMO_USER_ID in the request body.
+      // The API now reads user_id from the JWT cookie (set by login), so we just
+      // send credentials: "include" and omit user_id from the payload entirely.
       const payload: {
-        user_id: string;
         symbol: string;
         shares_owned: number;
         average_cost_basis?: number;
       } = {
-        user_id: DEMO_USER_ID,
         symbol,
         shares_owned: Number(sharesOwned),
       };
@@ -41,6 +39,7 @@ export default function AddHoldingForm({ symbol }: Props) {
 
       const res = await fetch(`${API_BASE_URL}/api/v1/holdings/by-symbol`, {
         method: "POST",
+        credentials: "include", // sends the investify_token cookie
         headers: {
           "Content-Type": "application/json",
         },
@@ -50,7 +49,12 @@ export default function AddHoldingForm({ symbol }: Props) {
       const data = await res.json();
 
       if (!res.ok) {
-        setStatus(data.error ?? "Failed to add holding");
+        // Surface auth errors clearly so the user knows to sign in first
+        if (res.status === 401) {
+          setStatus("Sign in first to add holdings.");
+        } else {
+          setStatus(data.error ?? "Failed to add holding");
+        }
         return;
       }
 

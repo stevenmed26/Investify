@@ -65,7 +65,7 @@ func (p *TwelveDataProvider) FetchDailyHistory(ctx context.Context, symbol strin
 	q.Set("apikey", apiKey)
 	u.RawQuery = q.Encode()
 
-	log.Printf("[marketdata] TwelveData request URL=%s", u.String())
+	log.Printf("[marketdata] TwelveData request symbol=%s days=%d", symbol, days)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {

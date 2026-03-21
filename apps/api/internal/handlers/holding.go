@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"investify/apps/api/internal/middleware"
 	"investify/apps/api/internal/models"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,6 +18,12 @@ type HoldingHandler struct {
 }
 
 func (h HoldingHandler) ListHoldings(w http.ResponseWriter, r *http.Request) {
+	user, ok := middleware.GetAuthUser(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
@@ -31,8 +38,9 @@ func (h HoldingHandler) ListHoldings(w http.ResponseWriter, r *http.Request) {
 			h.average_cost_basis
 		FROM holdings h
 		JOIN tickers t ON t.id = h.ticker_id
+		WHERE h.user_id = $1
 		ORDER BY t.symbol ASC
-	`)
+	`, user.UserID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch holdings"})
 		return
@@ -63,13 +71,20 @@ func (h HoldingHandler) ListHoldings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h HoldingHandler) CreateHolding(w http.ResponseWriter, r *http.Request) {
+	user, ok := middleware.GetAuthUser(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
 	var req models.CreateHoldingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
 		return
 	}
 
-	if req.UserID == "" || req.TickerID == "" || req.SharesOwned < 0 {
+	// Always use the authenticated user's ID, never trust the body.
+	if req.TickerID == "" || req.SharesOwned < 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing or invalid fields"})
 		return
 	}
@@ -82,7 +97,7 @@ func (h HoldingHandler) CreateHolding(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO holdings (user_id, ticker_id, shares_owned, average_cost_basis)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id
-	`, req.UserID, req.TickerID, req.SharesOwned, req.AverageCostBasis).Scan(&id)
+	`, user.UserID, req.TickerID, req.SharesOwned, req.AverageCostBasis).Scan(&id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create holding"})
 		return
@@ -94,6 +109,12 @@ func (h HoldingHandler) CreateHolding(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h HoldingHandler) CreateHoldingBySymbol(w http.ResponseWriter, r *http.Request) {
+	user, ok := middleware.GetAuthUser(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
 	var req models.CreateHoldingBySymbolRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -102,7 +123,7 @@ func (h HoldingHandler) CreateHoldingBySymbol(w http.ResponseWriter, r *http.Req
 
 	req.Symbol = strings.ToUpper(strings.TrimSpace(req.Symbol))
 
-	if req.UserID == "" || req.Symbol == "" || req.SharesOwned < 0 {
+	if req.Symbol == "" || req.SharesOwned < 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing or invalid fields"})
 		return
 	}
@@ -126,7 +147,7 @@ func (h HoldingHandler) CreateHoldingBySymbol(w http.ResponseWriter, r *http.Req
 		INSERT INTO holdings (user_id, ticker_id, shares_owned, average_cost_basis)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id
-	`, req.UserID, tickerID, req.SharesOwned, req.AverageCostBasis).Scan(&id)
+	`, user.UserID, tickerID, req.SharesOwned, req.AverageCostBasis).Scan(&id)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create holding"})
 		return

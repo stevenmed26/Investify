@@ -6,7 +6,16 @@ from app.services.predictor import predict_with_trained_model
 router = APIRouter()
 
 
-def build_rule_based_prediction(symbol: str) -> PredictResponse:
+def build_rule_based_prediction(symbol: str) -> PredictResponse | None:
+    """
+    Returns a rule-based PredictResponse if technical features exist for the symbol,
+    or None if no features have been backfilled yet.
+
+    FIX: The original raised HTTPException(404) when no feature row was found.
+    This caused the Go API to return 502 Bad Gateway to the frontend (since it
+    only passes through 200 OK). Returning None here lets the caller decide how
+    to handle the missing-data case gracefully.
+    """
     with get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -37,7 +46,7 @@ def build_rule_based_prediction(symbol: str) -> PredictResponse:
             row = cur.fetchone()
 
     if not row:
-        raise HTTPException(status_code=404, detail="No technical features found for symbol")
+        return None
 
     score = 0.0
     signals: list[str] = []
@@ -127,7 +136,6 @@ def build_rule_based_prediction(symbol: str) -> PredictResponse:
         recommendation = "wait"
 
     confidence = normalized if direction == "bullish" else (1.0 - normalized if direction == "bearish" else 0.55)
-
     predicted_return_pct = round(score * 4.0, 2)
     confidence = round(max(min(confidence, 0.95), 0.51 if direction == "neutral" else 0.05), 4)
 
@@ -149,8 +157,25 @@ def build_rule_based_prediction(symbol: str) -> PredictResponse:
 def predict(payload: PredictRequest):
     symbol = payload.symbol.upper()
 
+    # Try trained ML model first
     trained = predict_with_trained_model(symbol)
     if trained is not None:
         return trained
 
-    return build_rule_based_prediction(symbol)
+    # Fall back to rule-based prediction if features exist
+    rule_based = build_rule_based_prediction(symbol)
+    if rule_based is not None:
+        return rule_based
+
+    return PredictResponse(
+        symbol=symbol,
+        predicted_direction="neutral",
+        predicted_return_pct=0.0,
+        confidence_score=0.5,
+        recommendation="wait",
+        explanation={
+            "signals": [],
+            "risk_factors": ["No technical features found. Seed history and generate features first."],
+        },
+        model_version="no-data-v0",
+    )

@@ -51,6 +51,23 @@ def _build_labels(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _cursor_to_df(cur) -> pd.DataFrame:
+    """
+    FIX: pd.read_sql does not support psycopg3 connections — it requires
+    SQLAlchemy or sqlite3. Rather than adding SQLAlchemy as a dependency,
+    we fetch rows via the cursor directly and construct the DataFrame from
+    the column descriptions + row data, which works with any DBAPI driver.
+    """
+    rows = cur.fetchall()
+    if not rows:
+        return pd.DataFrame()
+    # psycopg3 with dict_row returns list-of-dicts; handle both cases.
+    if isinstance(rows[0], dict):
+        return pd.DataFrame(rows)
+    cols = [desc[0] for desc in cur.description]
+    return pd.DataFrame(rows, columns=cols)
+
+
 def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) -> pd.DataFrame:
     where_clause = ""
     params: list[object] = [horizon_days]
@@ -106,7 +123,9 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
     """
 
     with get_connection() as conn:
-        df = pd.read_sql(query, conn, params=params)
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            df = _cursor_to_df(cur)
 
     if df.empty:
         return df
@@ -181,7 +200,9 @@ def load_latest_feature_row(symbol: str) -> pd.DataFrame:
     """
 
     with get_connection() as conn:
-        df = pd.read_sql(query, conn, params=[symbol.upper()])
+        with conn.cursor() as cur:
+            cur.execute(query, [symbol.upper()])
+            df = _cursor_to_df(cur)
 
     if df.empty:
         return df

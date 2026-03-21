@@ -1,5 +1,3 @@
-import ApiKeyForm from "./components/ApiKeyForm";
-import AuthPanel from "./components/AuthPanel";
 import BatchIngestButton from "./components/BatchIngestButton";
 
 type Ticker = {
@@ -32,14 +30,12 @@ export default async function HomePage() {
   return (
     <main className="min-h-screen px-6 py-10">
       <div className="mx-auto max-w-6xl">
-        <h1 className="text-4xl font-bold">Investify</h1>
+        <h1 className="text-4xl font-bold">Markets</h1>
         <p className="mt-3 text-lg text-slate-300">
           Historical trend analysis, confidence scoring, and portfolio tracking.
         </p>
 
         <div className="mt-10 grid gap-6">
-          <AuthPanel />
-          <ApiKeyForm />
           <BatchIngestButton />
 
           <section className="rounded-2xl border border-white/10 bg-white/5 p-6">

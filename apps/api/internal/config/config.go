@@ -1,6 +1,9 @@
 package config
 
-import "os"
+import (
+	"log"
+	"os"
+)
 
 type Config struct {
 	Port             string
@@ -22,6 +25,18 @@ func getEnv(key, fallback string) string {
 }
 
 func Load() Config {
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = "dev-jwt-secret"
+		warnInsecureDefault("JWT_SECRET")
+	}
+
+	encKey := os.Getenv("APP_ENCRYPTION_KEY")
+	if encKey == "" {
+		encKey = "dev-encryption-secret"
+		warnInsecureDefault("APP_ENCRYPTION_KEY")
+	}
+
 	return Config{
 		Port:             getEnv("API_PORT", "8080"),
 		DBHost:           getEnv("API_DB_HOST", "localhost"),
@@ -30,7 +45,15 @@ func Load() Config {
 		DBUser:           getEnv("API_DB_USER", "investify"),
 		DBPassword:       getEnv("API_DB_PASSWORD", "investify"),
 		MLBaseURL:        getEnv("API_ML_BASE_URL", "http://localhost:8000"),
-		JWTSecret:        getEnv("JWT_SECRET", "dev-jwt-secret"),
-		AppEncryptionKey: getEnv("APP_ENCRYPTION_KEY", "dev-encryption-secret"),
+		JWTSecret:        jwtSecret,
+		AppEncryptionKey: encKey,
 	}
+}
+
+func warnInsecureDefault(key string) {
+	env := os.Getenv("APP_ENV")
+	if env == "production" || env == "prod" {
+		log.Fatalf("FATAL: %s must be set in production. Refusing to start with an insecure default.", key)
+	}
+	log.Printf("WARNING: %s is not set. Using insecure default — do NOT run this in production.", key)
 }

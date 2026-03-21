@@ -57,6 +57,9 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		CredentialService: credentialService,
 		ProviderName:      providerName,
 	}
+	featureService := &services.FeatureEngineeringService{
+		DB: db,
+	}
 
 	authHandler := handlers.AuthHandler{
 		DB:         db,
@@ -83,6 +86,11 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		PriceIngestionSV:  priceIngestionService,
 	}
 
+	featureHandler := handlers.FeatureHandler{
+		DB:        db,
+		FeatureSV: featureService,
+	}
+
 	requireAuth := authmw.RequireAuth(jwtManager)
 
 	r.Get("/health", handlers.Health)
@@ -101,9 +109,13 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		r.Get("/tickers/{symbol}/prediction", tickerHandler.GetPredictionBySymbol)
 		r.Get("/tickers/{symbol}/history", priceHandler.GetHistoricalPricesBySymbol)
 
-		r.Get("/holdings", holdingHandler.ListHoldings)
-		r.Post("/holdings", holdingHandler.CreateHolding)
-		r.Post("/holdings/by-symbol", holdingHandler.CreateHoldingBySymbol)
+		r.Group(func(r chi.Router) {
+			r.Use(requireAuth)
+
+			r.Get("/holdings", holdingHandler.ListHoldings)
+			r.Post("/holdings", holdingHandler.CreateHolding)
+			r.Post("/holdings/by-symbol", holdingHandler.CreateHoldingBySymbol)
+		})
 
 		r.Group(func(r chi.Router) {
 			r.Use(requireAuth)
@@ -112,6 +124,9 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 			r.Post("/admin/secrets/twelvedata", adminHandler.SetTwelveDataAPIKey)
 			r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
 			r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
+
+			r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
+			r.Get("/tickers/{symbol}/features", featureHandler.GetFeaturesBySymbol)
 		})
 	})
 
