@@ -2,13 +2,15 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
+	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"investify/apps/api/internal/clients/mlclient"
 	"investify/apps/api/internal/models"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -97,4 +99,93 @@ func (h TickerHandler) GetPredictionBySymbol(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, prediction)
+}
+
+// BulkUpsertTickers inserts or updates a list of tickers by symbol.
+// Uses ON CONFLICT (symbol) DO UPDATE so it is safe to call repeatedly —
+// re-adding an existing ticker just refreshes its name and exchange.
+// Symbols are normalised to uppercase and trimmed before insert.
+func (h TickerHandler) BulkUpsertTickers(w http.ResponseWriter, r *http.Request) {
+	var req models.BulkUpsertTickersRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if len(req.Tickers) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tickers array is required and must not be empty"})
+		return
+	}
+
+	if len(req.Tickers) > 500 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "maximum 500 tickers per request"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+
+	type itemResult struct {
+		Symbol string `json:"symbol"`
+		Action string `json:"action"` // "inserted" | "updated"
+		Error  string `json:"error,omitempty"`
+	}
+
+	results := make([]itemResult, 0, len(req.Tickers))
+	inserted := 0
+	updated := 0
+
+	for _, t := range req.Tickers {
+		symbol := strings.ToUpper(strings.TrimSpace(t.Symbol))
+		companyName := strings.TrimSpace(t.CompanyName)
+		exchange := strings.TrimSpace(t.Exchange)
+
+		if symbol == "" || companyName == "" {
+			results = append(results, itemResult{
+				Symbol: symbol,
+				Error:  "symbol and company_name are required",
+			})
+			continue
+		}
+
+		// Use xmax to detect whether the row was inserted or updated.
+		// xmax = 0 means the row is newly inserted; non-zero means it was updated.
+		var action string
+		var xmax uint32
+		err := h.DB.QueryRow(ctx, `
+			INSERT INTO tickers (symbol, company_name, exchange, is_active, created_at, updated_at)
+			VALUES ($1, $2, $3, TRUE, NOW(), NOW())
+			ON CONFLICT (symbol) DO UPDATE SET
+				company_name = EXCLUDED.company_name,
+				exchange     = EXCLUDED.exchange,
+				is_active    = TRUE,
+				updated_at   = NOW()
+			RETURNING xmax
+		`, symbol, companyName, exchange).Scan(&xmax)
+
+		if err != nil {
+			log.Printf("[tickers] upsert failed symbol=%s err=%v", symbol, err)
+			results = append(results, itemResult{Symbol: symbol, Error: "upsert failed"})
+			continue
+		}
+
+		if xmax == 0 {
+			action = "inserted"
+			inserted++
+		} else {
+			action = "updated"
+			updated++
+		}
+
+		results = append(results, itemResult{Symbol: symbol, Action: action})
+	}
+
+	log.Printf("[tickers] bulk upsert complete inserted=%d updated=%d errors=%d",
+		inserted, updated, len(req.Tickers)-inserted-updated)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"inserted": inserted,
+		"updated":  updated,
+		"results":  results,
+	})
 }

@@ -34,3 +34,4 @@ go.work.sum
 #Auto generated files
 node_modules/
 .next/
+__pycache__/

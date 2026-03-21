@@ -104,7 +104,12 @@ func (h AdminHandler) BatchIngestHistory(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	days := 180
+	// FIX: Default raised from 180 to 365 days. SMA-50 requires 50 prior trading
+	// days before it produces a value, and momentum/volatility indicators need
+	// additional warmup. With 180 calendar days (~129 trading days) only ~79 rows
+	// have valid SMA-50 values. 365 days (~260 trading days) gives ~210 fully
+	// populated rows per ticker — enough for all indicators to be meaningful.
+	days := 365
 	if raw := r.URL.Query().Get("days"); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 5000 {
 			days = parsed
@@ -154,15 +159,9 @@ func (h AdminHandler) BatchIngestHistory(w http.ResponseWriter, r *http.Request)
 		rowsProcessed, err := h.PriceIngestionSV.IngestBySymbolForUser(ctx, user.UserID, symbol, days)
 		if err != nil {
 			log.Printf("[batch-ingest] failed user_id=%s symbol=%s err=%v", user.UserID, symbol, err)
-			results = append(results, itemResult{
-				Symbol: symbol,
-				Error:  err.Error(),
-			})
+			results = append(results, itemResult{Symbol: symbol, Error: err.Error()})
 		} else {
-			results = append(results, itemResult{
-				Symbol:        symbol,
-				RowsProcessed: rowsProcessed,
-			})
+			results = append(results, itemResult{Symbol: symbol, RowsProcessed: rowsProcessed})
 		}
 
 		if i < len(symbols)-1 && delayMS > 0 {
@@ -185,5 +184,74 @@ func (h AdminHandler) BatchIngestHistory(w http.ResponseWriter, r *http.Request)
 		"days":     days,
 		"delay_ms": delayMS,
 		"results":  results,
+	})
+}
+
+// BatchBackfillFeatures backfills technical features for all active tickers
+// in a single request. Previously users had to navigate to each ticker page
+// and click "Generate Features" individually — meaning training almost always
+// ran with only one ticker's data in technical_features.
+func (h AdminHandler) BatchBackfillFeatures(w http.ResponseWriter, r *http.Request) {
+	user, ok := middleware.GetAuthUser(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	defer cancel()
+
+	rows, err := h.DB.Query(ctx, `
+		SELECT symbol
+		FROM tickers
+		WHERE is_active = TRUE
+		ORDER BY symbol ASC
+	`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch active tickers"})
+		return
+	}
+	defer rows.Close()
+
+	var symbols []string
+	for rows.Next() {
+		var symbol string
+		if err := rows.Scan(&symbol); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to scan ticker"})
+			return
+		}
+		symbols = append(symbols, symbol)
+	}
+
+	log.Printf("[batch-backfill] start user_id=%s symbols=%d", user.UserID, len(symbols))
+
+	type itemResult struct {
+		Symbol        string `json:"symbol"`
+		RowsProcessed int    `json:"rows_processed,omitempty"`
+		Error         string `json:"error,omitempty"`
+	}
+
+	results := make([]itemResult, 0, len(symbols))
+
+	featureSV := services.FeatureEngineeringService{DB: h.DB}
+
+	for i, symbol := range symbols {
+		log.Printf("[batch-backfill] processing index=%d/%d symbol=%s", i+1, len(symbols), symbol)
+
+		count, err := featureSV.BackfillBySymbol(ctx, symbol)
+		if err != nil {
+			log.Printf("[batch-backfill] failed symbol=%s err=%v", symbol, err)
+			results = append(results, itemResult{Symbol: symbol, Error: err.Error()})
+		} else {
+			log.Printf("[batch-backfill] done symbol=%s rows=%d", symbol, count)
+			results = append(results, itemResult{Symbol: symbol, RowsProcessed: count})
+		}
+	}
+
+	log.Printf("[batch-backfill] completed user_id=%s symbols=%d", user.UserID, len(symbols))
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":  "ok",
+		"results": results,
 	})
 }

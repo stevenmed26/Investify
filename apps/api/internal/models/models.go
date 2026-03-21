@@ -12,6 +12,18 @@ type Ticker struct {
 	IsActive    bool   `json:"is_active"`
 }
 
+// BulkUpsertTickerItem is a single ticker entry in a bulk upsert request.
+type BulkUpsertTickerItem struct {
+	Symbol      string `json:"symbol"`
+	CompanyName string `json:"company_name"`
+	Exchange    string `json:"exchange"`
+}
+
+// BulkUpsertTickersRequest is the request body for POST /admin/tickers/bulk.
+type BulkUpsertTickersRequest struct {
+	Tickers []BulkUpsertTickerItem `json:"tickers"`
+}
+
 type Holding struct {
 	ID               string   `json:"id"`
 	UserID           string   `json:"user_id"`

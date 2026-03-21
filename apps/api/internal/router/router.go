@@ -57,6 +57,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		CredentialService: credentialService,
 		ProviderName:      providerName,
 	}
+
 	featureService := &services.FeatureEngineeringService{
 		DB: db,
 	}
@@ -99,34 +100,39 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
 		r.Post("/logout", authHandler.Logout)
-
 		r.With(requireAuth).Get("/me", authHandler.Me)
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
+		// Public read endpoints
 		r.Get("/tickers", tickerHandler.ListTickers)
 		r.Get("/tickers/{symbol}", tickerHandler.GetTickerBySymbol)
 		r.Get("/tickers/{symbol}/prediction", tickerHandler.GetPredictionBySymbol)
 		r.Get("/tickers/{symbol}/history", priceHandler.GetHistoricalPricesBySymbol)
+		r.Get("/tickers/{symbol}/features", featureHandler.GetFeaturesBySymbol)
 
 		r.Group(func(r chi.Router) {
 			r.Use(requireAuth)
 
+			// Holdings
 			r.Get("/holdings", holdingHandler.ListHoldings)
 			r.Post("/holdings", holdingHandler.CreateHolding)
 			r.Post("/holdings/by-symbol", holdingHandler.CreateHoldingBySymbol)
-		})
 
-		r.Group(func(r chi.Router) {
-			r.Use(requireAuth)
-
+			// Provider / credentials
 			r.Get("/admin/provider-status", adminHandler.GetProviderStatus)
 			r.Post("/admin/secrets/twelvedata", adminHandler.SetTwelveDataAPIKey)
+
+			// Ticker management
+			r.Post("/admin/tickers/bulk", tickerHandler.BulkUpsertTickers)
+
+			// Price ingestion
 			r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
 			r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
 
+			// Feature engineering
 			r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
-			r.Get("/tickers/{symbol}/features", featureHandler.GetFeaturesBySymbol)
+			r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
 		})
 	})
 
