@@ -1,6 +1,6 @@
 import BatchBackfillButton from "./components/BatchBackfillButton";
 import BatchIngestButton from "./components/BatchIngestButton";
-import TickerCard from "./components/TickerCard";
+import TickerList from "./components/TickerList";
 import TickerManager from "./components/TickerManager";
 
 type Ticker = {
@@ -62,11 +62,7 @@ export default async function HomePage() {
             <p className="mt-2 text-sm">Expand setup above to add tickers.</p>
           </div>
         ) : (
-          <div className="ticker-list">
-            {tickers.map((ticker) => (
-              <TickerCard key={ticker.id} ticker={ticker} />
-            ))}
-          </div>
+          <TickerList tickers={tickers} />
         )}
       </div>
     </main>

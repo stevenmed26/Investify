@@ -125,7 +125,6 @@ function CardLoaded({
         <MiniSparkline
           data={data.prices}
           prediction={noModel ? null : prediction}
-          width={260}
           height={68}
         />
 
@@ -189,7 +188,7 @@ export default function TickerCard({ ticker }: { ticker: Ticker }) {
 
     async function load() {
       const [histRes, predRes] = await Promise.allSettled([
-        fetch(`${API}/api/v1/tickers/${ticker.symbol}/history?limit=90`, {
+        fetch(`${API}/api/v1/tickers/${ticker.symbol}/history?limit=30`, {
           credentials: "include",
         }),
         fetch(`${API}/api/v1/tickers/${ticker.symbol}/prediction?horizon_days=5`, {
