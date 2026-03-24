@@ -11,9 +11,10 @@ type Ticker = {
   symbol: string;
   company_name: string;
   exchange: string;
+  sector?: string;
 };
 
-type PricePoint = { trading_date: string; close: number };
+type PricePoint = { trading_date: string; close: number; volume?: number };
 
 type Prediction = {
   predicted_direction: "bullish" | "neutral" | "bearish";
@@ -81,9 +82,11 @@ function CardSkeleton({ symbol, company_name, exchange }: Ticker) {
 function CardLoaded({
   ticker,
   data,
+  isOwned,
 }: {
   ticker: Ticker;
   data: CardData;
+  isOwned?: boolean;
 }) {
   const { prediction, latestClose, change1d, change20d } = data;
   const dir = dirLabel(prediction?.predicted_direction);
@@ -100,6 +103,8 @@ function CardLoaded({
         <span className="ticker-symbol">{ticker.symbol}</span>
         <span className="ticker-name">{ticker.company_name}</span>
         <span className="ticker-exchange">{ticker.exchange}</span>
+        {ticker.sector && <span className="ticker-sector">{ticker.sector}</span>}
+        {isOwned && <span className="ticker-owned-badge">★ Owned</span>}
 
         {latestClose != null && (
           <span className="ticker-price">${latestClose.toFixed(2)}</span>
@@ -125,7 +130,7 @@ function CardLoaded({
         <MiniSparkline
           data={data.prices}
           prediction={noModel ? null : prediction}
-          height={68}
+          height={82}
         />
 
         {prediction && !noModel && (
@@ -134,7 +139,6 @@ function CardLoaded({
             <span className={`ticker-return ${pctColor(prediction.predicted_return_pct)}`}>
               {fmt(prediction.predicted_return_pct)}&nbsp;projected
             </span>
-            <span className={`ticker-reco border ${reco.bg}`}>{reco.label}</span>
           </div>
         )}
 
@@ -143,11 +147,12 @@ function CardLoaded({
         )}
       </div>
 
-      {/* ── Right: confidence gauge ── */}
+      {/* ── Right: reco badge + confidence gauge ── */}
       <div className="ticker-right">
         {prediction && !noModel ? (
           <>
-            <ConfidenceGauge value={prediction.confidence_score} size={68} />
+            <span className={`ticker-reco-badge border ${reco.bg}`}>{reco.label}</span>
+            <ConfidenceGauge value={prediction.confidence_score} size={82} />
             <span className="ticker-conf-label">confidence</span>
           </>
         ) : (
@@ -159,7 +164,7 @@ function CardLoaded({
 }
 
 // ─── Main export ──────────────────────────────────────────────────────────────
-export default function TickerCard({ ticker }: { ticker: Ticker }) {
+export default function TickerCard({ ticker, isOwned }: { ticker: Ticker; isOwned?: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const [data, setData] = useState<CardData | null>(null);
@@ -234,7 +239,7 @@ export default function TickerCard({ ticker }: { ticker: Ticker }) {
   return (
     <div ref={ref}>
       {data ? (
-        <CardLoaded ticker={ticker} data={data} />
+        <CardLoaded ticker={ticker} data={data} isOwned={isOwned} />
       ) : (
         <CardSkeleton {...ticker} />
       )}
