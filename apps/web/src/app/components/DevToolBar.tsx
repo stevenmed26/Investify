@@ -33,7 +33,7 @@ export default function DevToolbar() {
     // ── Step 1: Batch ingest ──────────────────────────────────────────────
     setStep("ingest");
     try {
-      const r = await fetch(`${API}/api/v1/admin/ingest/batch/history?days=365&delay_ms=500`, {
+      const r = await fetch(`${API}/api/v1/admin/ingest/batch/history?days=365&delay_ms=8000`, {
         method: "POST", credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({}),

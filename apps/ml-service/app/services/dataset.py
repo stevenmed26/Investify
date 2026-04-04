@@ -19,6 +19,7 @@ RAW_INDICATOR_COLUMNS = [
     "momentum_5d",
     "momentum_20d",
     "volatility_20d",
+    "volume_ratio_20d",
 ]
 
 
@@ -30,6 +31,7 @@ ALL_MODEL_FEATURES = [
     "price_vs_sma20",
     "price_vs_sma50",
     "macd_pct",
+    "volume_ratio_20d",
 ]
 
 
@@ -143,6 +145,7 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
                 tf.rsi_14, tf.macd,
                 tf.momentum_5d, tf.momentum_20d,
                 tf.volatility_20d,
+                tf.volume_ratio_20d,
                 hp.close,
                 LEAD(hp.close, %s) OVER (
                     PARTITION BY tf.ticker_id
@@ -160,6 +163,7 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
             sma_20, sma_50, ema_12, ema_26,
             rsi_14, macd,
             momentum_5d, momentum_20d, volatility_20d,
+            volume_ratio_20d,
             close, future_close
         FROM feature_prices
         ORDER BY symbol, trading_date
@@ -191,7 +195,7 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
     # Drop rows where essential raw indicators are null — these can't produce
     # valid derived features. Use only the indicators that feed into model features.
     required_raw = ["rsi_14", "momentum_5d", "momentum_20d", "volatility_20d",
-                    "sma_20", "sma_50", "macd", "close"]
+                    "sma_20", "sma_50", "macd", "close", "volume_ratio_20d"]
     before = len(df)
     df = df.dropna(subset=required_raw).reset_index(drop=True)
     logger.debug("[dataset] dropped rows with null indicators before=%d after=%d", before, len(df))
@@ -242,6 +246,7 @@ def load_latest_feature_row(symbol: str) -> pd.DataFrame:
             tf.rsi_14, tf.macd,
             tf.momentum_5d, tf.momentum_20d,
             tf.volatility_20d,
+            tf.volume_ratio_20d,
             hp.close
         FROM technical_features tf
         JOIN tickers t ON t.id = tf.ticker_id

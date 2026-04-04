@@ -12,6 +12,7 @@ import {
   ReferenceLine,
   TooltipProps,
 } from "recharts";
+import { addTradingDays, formatTradingDate } from "../../lib/tradingDays";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -52,24 +53,6 @@ type ChartPoint = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** Advance a YYYY-MM-DD date by N calendar days, skipping weekends. */
-function addTradingDays(dateStr: string, days: number): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  let added = 0;
-  while (added < days) {
-    d.setUTCDate(d.getUTCDate() + 1);
-    const dow = d.getUTCDay();
-    if (dow !== 0 && dow !== 6) added++;
-  }
-  return d.toISOString().slice(0, 10);
-}
-
-/** Format YYYY-MM-DD as "Mar 20" */
-function fmtDate(dateStr: string): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-}
 
 /** Round to 2 dp */
 function r2(n: number) {
@@ -163,7 +146,7 @@ function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
 
   return (
     <div className="rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-xs shadow-lg">
-      <p className="mb-1 font-semibold text-white">{fmtDate(point.date)}</p>
+      <p className="mb-1 font-semibold text-white">{formatTradingDate(point.date)}</p>
       {point.close != null && (
         <p className="text-slate-300">Close: <span className="text-white font-medium">${point.close.toFixed(2)}</span></p>
       )}
@@ -222,7 +205,7 @@ export default function PriceChart({ data, prediction }: Props) {
             axisLine={false}
             minTickGap={32}
             interval={tickInterval}
-            tickFormatter={fmtDate}
+            tickFormatter={formatTradingDate}
           />
 
           <YAxis

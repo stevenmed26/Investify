@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.compose import ColumnTransformer
+from sklearn.frozen import FrozenEstimator
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report
@@ -163,9 +165,8 @@ def train_model(horizon_days: int = 5) -> TrainResult:
 
     logger.info("[trainer] calibrating probabilities method=sigmoid cal_rows=%d", len(X_cal))
     calibrated_clf = CalibratedClassifierCV(
-        estimator=base_clf,
+        estimator=FrozenEstimator(base_clf),
         method="sigmoid",
-        cv="prefit",
     )
     calibrated_clf.fit(X_cal, y_cal)
 
@@ -190,6 +191,10 @@ def train_model(horizon_days: int = 5) -> TrainResult:
     )
     logger.debug("[trainer] classification report: %s", report)
 
+    # Generate a unique version string for this training run so predictions,
+    # logs, and model comparisons are always traceable to a specific train.
+    model_version = f"ml-v{time.strftime('%Y%m%d-%H%M%S')}"
+
     bundle = {
         "model":        calibrated_clf,
         "features":     ALL_MODEL_FEATURES,
@@ -206,7 +211,7 @@ def train_model(horizon_days: int = 5) -> TrainResult:
             "tickers":    tickers,
             "scope":      "ALL",
             "model_type": "logistic_regression_calibrated",
-            "version":    "ml-v0.7.0",
+            "version":    model_version,
         },
     }
 

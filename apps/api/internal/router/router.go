@@ -4,6 +4,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"investify/apps/api/internal/auth"
 	"investify/apps/api/internal/clients/mlclient"
@@ -22,8 +24,22 @@ import (
 func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 	r := chi.NewRouter()
 
+	// CORS: read allowed origins from env so production deployments work.
+	// ALLOWED_ORIGINS is a comma-separated list, e.g.:
+	//   http://localhost:3000,https://investify.example.com
+	corsOrigins := os.Getenv("ALLOWED_ORIGINS")
+	if corsOrigins == "" {
+		corsOrigins = "http://localhost:3000"
+		log.Printf("[cors] ALLOWED_ORIGINS not set — defaulting to http://localhost:3000 (dev only)")
+	}
+	allowedOrigins := strings.Split(corsOrigins, ",")
+	for i, o := range allowedOrigins {
+		allowedOrigins[i] = strings.TrimSpace(o)
+	}
+	log.Printf("[cors] allowed origins: %v", allowedOrigins)
+
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: true,
@@ -70,10 +86,15 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 
 	requireAuth := authmw.RequireAuth(jwtManager)
 
+	// Rate limit auth endpoints: 10 attempts per minute per IP.
+	// This protects against brute-force and credential stuffing.
+	authLimiter := authmw.NewRateLimiter(10, 1*time.Minute)
+
 	r.Get("/health", handlers.Health)
 
 	// Auth
 	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Use(authLimiter.Limit)
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
 		r.Post("/logout", authHandler.Logout)

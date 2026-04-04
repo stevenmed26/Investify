@@ -1,74 +1,102 @@
-version: "3.9"
-
 services:
+
+  # ── PostgreSQL ────────────────────────────────────────────────────────────
   postgres:
-    image: postgres:16
-    container_name: investify-postgres
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_DB:       ${POSTGRES_DB}
+      POSTGRES_USER:     ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "${POSTGRES_PORT}:5432"
     volumes:
+      # Persist data across container restarts and upgrades
       - postgres_data:/var/lib/postgresql/data
-      - ./db/migrations:/docker-entrypoint-initdb.d
+      # All .sql files in migrations/ are run in filename order on first init
+      - ./apps/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
 
+  # ── Go API ────────────────────────────────────────────────────────────────
   api:
-    image: golang:1.24
-    container_name: investify-api
-    working_dir: /app
-    command: sh -c "go mod tidy && go run ./cmd/server"
-    volumes:
-      - ./apps/api:/app
-    environment:
-      API_PORT: ${API_PORT}
-      API_DB_HOST: ${API_DB_HOST}
-      API_DB_PORT: ${API_DB_PORT}
-      API_DB_NAME: ${API_DB_NAME}
-      API_DB_USER: ${API_DB_USER}
-      API_DB_PASSWORD: ${API_DB_PASSWORD}
-      API_ML_BASE_URL: ${API_ML_BASE_URL}
+    build:
+      context: ./apps
+      dockerfile: api/Dockerfile
+    restart: unless-stopped
     ports:
-      - "${API_PORT}:8080"
+      - "${API_PORT:-8080}:8080"
     depends_on:
-      - postgres
-      - ml-service
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Override DB connection to use the Docker service name
+      API_DB_HOST: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
+  # ── Python ML service ─────────────────────────────────────────────────────
   ml-service:
-    image: python:3.12-slim
-    container_name: investify-ml
-    working_dir: /app
-    command: sh -c "pip install --no-cache-dir -r requirements.txt && uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
-    volumes:
-      - ./apps/ml-service:/app
-      - ./apps/ml-service/artifacts:/app/artifacts
-    environment:
-      ML_PORT: ${ML_PORT}
-      ML_DB_HOST: postgres
-      ML_DB_PORT: 5432
-      ML_DB_NAME: ${POSTGRES_DB}
-      ML_DB_USER: ${POSTGRES_USER}
-      ML_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    build:
+      context: ./apps/ml-service
+      dockerfile: Dockerfile
+    restart: unless-stopped
     ports:
-      - "${ML_PORT}:8000"
+      - "${ML_PORT:-8000}:8000"
     depends_on:
-      - postgres
-
-  web:
-    image: node:22
-    container_name: investify-web
-    working_dir: /app
-    command: sh -c "npm install && npm run dev"
+      postgres:
+        condition: service_healthy
+    env_file: .env
     volumes:
-      - ./apps/web:/app
-    environment:
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL}
+      # CRITICAL: persist the trained model across container restarts.
+      # Without this volume, every `docker compose up --build` discards
+      # the model and the service falls back to rule-based predictions
+      # until someone manually re-triggers training.
+      - ml_artifacts:/app/artifacts
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ── Next.js web app ───────────────────────────────────────────────────────
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        # NEXT_PUBLIC_* vars are baked in at build time by Next.js.
+        # They must be passed as build args, not just runtime env vars.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+    restart: unless-stopped
     ports:
       - "3000:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
+      ml-service:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # Internal service URLs (container-to-container, not exposed to browser)
+      INTERNAL_API_BASE_URL: http://api:8080
+      INTERNAL_ML_BASE_URL:  http://ml-service:8000
 
 volumes:
+  # Named volume — survives `docker compose down` (but not `down -v`)
   postgres_data:
+    driver: local
+
+  # Stores current_model.joblib so retraining isn't lost on restart
+  ml_artifacts:
+    driver: local

@@ -804,12 +804,6 @@
       "sector": "Communication Services"
     },
     {
-      "symbol": "PARA",
-      "name": "Paramount Global",
-      "exchange": "NASDAQ",
-      "sector": "Communication Services"
-    },
-    {
       "symbol": "FOX",
       "name": "Fox Corporation",
       "exchange": "NASDAQ",
@@ -1110,12 +1104,6 @@
       "sector": "Healthcare"
     },
     {
-      "symbol": "AbbVie",
-      "name": "AbbVie Inc.",
-      "exchange": "NYSE",
-      "sector": "Healthcare"
-    },
-    {
       "symbol": "BIIB",
       "name": "Biogen Inc.",
       "exchange": "NASDAQ",
@@ -1203,12 +1191,6 @@
       "symbol": "NTRS",
       "name": "Northern Trust Corporation",
       "exchange": "NASDAQ",
-      "sector": "Financials"
-    },
-    {
-      "symbol": "DFS",
-      "name": "Discover Financial Services",
-      "exchange": "NYSE",
       "sector": "Financials"
     },
     {
@@ -1476,12 +1458,6 @@
       "sector": "Technology"
     },
     {
-      "symbol": "NEP",
-      "name": "NextEra Energy Partners LP",
-      "exchange": "NYSE",
-      "sector": "Utilities"
-    },
-    {
       "symbol": "BEP",
       "name": "Brookfield Renewable Partners LP",
       "exchange": "NYSE",
@@ -1608,12 +1584,6 @@
       "sector": "Technology"
     },
     {
-      "symbol": "JNPR",
-      "name": "Juniper Networks Inc.",
-      "exchange": "NYSE",
-      "sector": "Technology"
-    },
-    {
       "symbol": "AKAM",
       "name": "Akamai Technologies Inc.",
       "exchange": "NASDAQ",
@@ -1731,12 +1701,6 @@
       "symbol": "WTW",
       "name": "Willis Towers Watson plc",
       "exchange": "NASDAQ",
-      "sector": "Financials"
-    },
-    {
-      "symbol": "RE",
-      "name": "Everest Group Ltd.",
-      "exchange": "NYSE",
       "sector": "Financials"
     },
     {

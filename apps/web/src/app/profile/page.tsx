@@ -1,647 +1,518 @@
 "use client";
 
-import "./profile.css";
-import { useEffect, useState, useCallback, useRef } from "react";
-import {
-  ComposedChart, Line, Area, XAxis, YAxis, Tooltip,
-  ResponsiveContainer, ReferenceLine, CartesianGrid,
-  TooltipProps,
-} from "recharts";
+import { useEffect, useState, useCallback } from "react";
 
 const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
-type User   = { id: string; email: string };
-type Holding = {
-  id: string; symbol: string; company_name: string;
-  shares_owned: number; average_cost_basis: number | null;
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+type RawHolding = {
+  id: string;
+  symbol: string;
+  company_name: string;
+  shares_owned: number;
+  average_cost_basis: number | null;
 };
-type PriceBar = {
-  trading_date: string; open: number; high: number;
-  low: number; close: number; volume: number;
-};
+
 type Prediction = {
   predicted_direction: "bullish" | "neutral" | "bearish";
-  predicted_return_pct: number; confidence_score: number;
-  recommendation: "buy" | "sell" | "wait"; model_version: string;
+  confidence_score: number;
+  recommendation: "buy" | "sell" | "wait";
 };
-type HoldingDetail = {
-  holding: Holding;
-  prices: PriceBar[];
+
+type EnrichedHolding = RawHolding & {
+  latest_close: number | null;
+  market_value: number | null;
+  cost_basis_total: number | null;
+  unrealized_pnl: number | null;
+  unrealized_pnl_pct: number | null;
+  day_change_pct: number | null;
   prediction: Prediction | null;
-  latestClose: number | null;
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// API helpers
-// ─────────────────────────────────────────────────────────────────────────────
-async function get(path: string) {
-  const r = await fetch(`${API}${path}`, { credentials: "include", cache: "no-store" });
-  if (!r.ok) throw new Error("Request failed");
-  return r.json();
-}
-async function post(path: string, body: unknown) {
-  const r = await fetch(`${API}${path}`, {
-    method: "POST", credentials: "include",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const d = await r.json();
-  if (!r.ok) throw new Error(d.error ?? "Failed");
-  return d;
-}
-async function del(path: string) {
-  const r = await fetch(`${API}${path}`, { method: "DELETE", credentials: "include" });
-  if (!r.ok) throw new Error("Delete failed");
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
-function fmtMoney(v: number) {
-  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2 }).format(v);
-}
-function fmtPct(v: number, withSign = true) {
-  return (withSign && v >= 0 ? "+" : "") + v.toFixed(2) + "%";
-}
-function fmtDate(d: string) {
-  return new Date(d + "T00:00:00Z").toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-}
-function addTradingDays(dateStr: string, days: number) {
-  const d = new Date(dateStr + "T00:00:00Z");
-  let added = 0;
-  while (added < days) {
-    d.setUTCDate(d.getUTCDate() + 1);
-    if (d.getUTCDay() !== 0 && d.getUTCDay() !== 6) added++;
-  }
-  return d.toISOString().slice(0, 10);
-}
-function pnlColor(v: number) { return v > 0 ? "#4ade80" : v < 0 ? "#f87171" : "#94a3b8"; }
-function dirColor(d?: string) {
-  if (d === "bullish") return "#4ade80"; if (d === "bearish") return "#f87171"; return "#94a3b8";
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Position chart — cost basis reference + price history + ML projection
-// ─────────────────────────────────────────────────────────────────────────────
-type ChartPoint = {
-  date: string; close?: number | null; projected?: number | null;
-  bandHigh?: number | null; bandLow?: number | null; isFuture?: boolean;
+type PortfolioSummary = {
+  total_value: number;
+  total_invested: number;
+  total_pnl: number;
+  total_pnl_pct: number;
+  bullish_count: number;
+  bearish_count: number;
 };
 
-function buildChartData(prices: PriceBar[], prediction: Prediction | null, costBasis: number | null) {
-  if (!prices.length) return { points: [] as ChartPoint[], todayDate: "" };
+// ─── API helpers ─────────────────────────────────────────────────────────────
 
-  const sorted = [...prices].sort((a, b) => a.trading_date.localeCompare(b.trading_date));
-  const last = sorted[sorted.length - 1];
-  const lastClose = last.close;
-  const todayDate = last.trading_date;
+async function fetchJSON<T>(path: string): Promise<T> {
+  const res = await fetch(`${API}${path}`, { credentials: "include" });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
 
-  const points: ChartPoint[] = sorted.map((p, i) => ({
-    date: p.trading_date,
-    close: p.close,
-    projected: i === sorted.length - 1 ? lastClose : null,
-    bandHigh: null, bandLow: null,
-    isFuture: false,
-  }));
+async function enrichHolding(h: RawHolding): Promise<EnrichedHolding> {
+  const [histData, predData] = await Promise.allSettled([
+    fetchJSON<{ prices: { trading_date: string; close: number }[] }>(
+      `/api/v1/tickers/${h.symbol}/history?limit=2`
+    ),
+    fetchJSON<Prediction>(
+      `/api/v1/tickers/${h.symbol}/prediction?horizon_days=5`
+    ),
+  ]);
 
-  if (prediction) {
-    const horizon = 5;
-    const target = lastClose * (1 + prediction.predicted_return_pct / 100);
-    const conf = Math.max(0.05, Math.min(0.99, prediction.confidence_score));
-    const bandHalf = lastClose * (1 - conf) * Math.max(Math.abs(prediction.predicted_return_pct / 100), 0.005);
+  let latest_close: number | null = null;
+  let day_change_pct: number | null = null;
 
-    for (let i = 1; i <= horizon; i++) {
-      const frac = i / horizon;
-      const proj = lastClose + (target - lastClose) * frac;
-      points.push({
-        date: addTradingDays(todayDate, i),
-        close: null,
-        projected: proj,
-        bandHigh: proj + bandHalf * frac,
-        bandLow: proj - bandHalf * frac,
-        isFuture: true,
-      });
+  if (histData.status === "fulfilled") {
+    const prices = [...(histData.value.prices ?? [])].sort((a, b) =>
+      a.trading_date.localeCompare(b.trading_date)
+    );
+    if (prices.length >= 1) latest_close = prices[prices.length - 1].close;
+    if (prices.length >= 2) {
+      const prev = prices[prices.length - 2].close;
+      if (prev > 0) day_change_pct = ((latest_close! - prev) / prev) * 100;
     }
   }
 
-  return { points, todayDate };
-}
+  const market_value =
+    latest_close != null ? h.shares_owned * latest_close : null;
+  const cost_basis_total =
+    h.average_cost_basis != null
+      ? h.shares_owned * h.average_cost_basis
+      : null;
+  const unrealized_pnl =
+    market_value != null && cost_basis_total != null
+      ? market_value - cost_basis_total
+      : null;
+  const unrealized_pnl_pct =
+    unrealized_pnl != null && cost_basis_total != null && cost_basis_total > 0
+      ? (unrealized_pnl / cost_basis_total) * 100
+      : null;
 
-function PositionChart({ detail }: { detail: HoldingDetail }) {
-  const { holding, prices, prediction } = detail;
-  const costBasis = holding.average_cost_basis;
-  const { points, todayDate } = buildChartData(prices, prediction, costBasis);
+  const prediction =
+    predData.status === "fulfilled" ? predData.value : null;
 
-  if (!points.length) return (
-    <div className="pf-chart-empty">No price history — seed data first</div>
-  );
-
-  const allY = points.flatMap(p =>
-    [p.close, p.projected, p.bandHigh, p.bandLow, costBasis].filter((v): v is number => v != null)
-  );
-  const minY = Math.min(...allY);
-  const maxY = Math.max(...allY);
-  const pad  = (maxY - minY) * 0.1;
-  const dom: [number, number] = [Math.floor(minY - pad), Math.ceil(maxY + pad)];
-
-  const dir   = prediction?.predicted_direction;
-  const color = dirColor(dir);
-
-  const CustomTooltip = ({ active, payload }: TooltipProps<number, string>) => {
-    if (!active || !payload?.length) return null;
-    const p = payload[0].payload as ChartPoint;
-    return (
-      <div className="pf-tooltip">
-        <div className="pf-tooltip-date">{fmtDate(p.date)}</div>
-        {p.close    != null && <div>Close <span>{fmtMoney(p.close)}</span></div>}
-        {p.projected != null && p.isFuture && (
-          <>
-            <div>Projected <span style={{ color }}>{fmtMoney(p.projected)}</span></div>
-            {p.bandHigh != null && <div className="pf-tooltip-range">{fmtMoney(p.bandLow!)} – {fmtMoney(p.bandHigh)}</div>}
-          </>
-        )}
-        {costBasis != null && (
-          <div>Cost basis <span style={{ color: "#94a3b8" }}>{fmtMoney(costBasis)}</span></div>
-        )}
-      </div>
-    );
+  return {
+    ...h,
+    latest_close,
+    market_value,
+    cost_basis_total,
+    unrealized_pnl,
+    unrealized_pnl_pct,
+    day_change_pct,
+    prediction,
   };
-
-  return (
-    <div className="pf-chart-wrap">
-      <ResponsiveContainer width="100%" height={220}>
-        <ComposedChart data={points} margin={{ top: 10, right: 16, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.04)" />
-          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#4b5563" }} tickLine={false}
-            axisLine={false} minTickGap={40} tickFormatter={fmtDate} />
-          <YAxis tick={{ fontSize: 10, fill: "#4b5563" }} tickLine={false} axisLine={false}
-            width={72} domain={dom} tickFormatter={(v) => `$${v.toFixed(0)}`} />
-          <Tooltip content={<CustomTooltip />} />
-
-          {/* Cost basis reference line */}
-          {costBasis != null && (
-            <ReferenceLine y={costBasis} stroke="rgba(148,163,184,0.4)"
-              strokeDasharray="4 3"
-              label={{ value: `Avg cost $${costBasis.toFixed(2)}`, position: "insideTopLeft",
-                fontSize: 9, fill: "rgba(148,163,184,0.6)", dy: -4 }} />
-          )}
-
-          {/* Today divider */}
-          {todayDate && (
-            <ReferenceLine x={todayDate} stroke="rgba(255,255,255,0.15)" strokeDasharray="3 3"
-              label={{ value: "Today", position: "insideTopRight",
-                fontSize: 9, fill: "rgba(255,255,255,0.3)", dy: -4 }} />
-          )}
-
-          {/* Confidence band */}
-          <Area type="monotone" dataKey="bandHigh" stroke="none"
-            fill={color} fillOpacity={0.1} isAnimationActive={false} legendType="none" />
-          <Area type="monotone" dataKey="bandLow" stroke="none"
-            fill="#080d1a" fillOpacity={1} isAnimationActive={false} legendType="none" />
-
-          {/* Historical price */}
-          <Line type="monotone" dataKey="close" stroke="#60a5fa" strokeWidth={2}
-            dot={false} isAnimationActive={false} connectNulls={false} />
-
-          {/* ML projection */}
-          <Line type="monotone" dataKey="projected" stroke={color} strokeWidth={2}
-            strokeDasharray="5 4" dot={false} isAnimationActive={false} connectNulls={false} />
-        </ComposedChart>
-      </ResponsiveContainer>
-    </div>
-  );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Holding row — expanded with chart + stats
-// ─────────────────────────────────────────────────────────────────────────────
-function HoldingRow({
-  detail, onDelete,
-}: {
-  detail: HoldingDetail; onDelete: (id: string) => void;
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function computeSummary(holdings: EnrichedHolding[]): PortfolioSummary {
+  let total_value = 0;
+  let total_invested = 0;
+  let bullish_count = 0;
+  let bearish_count = 0;
+
+  for (const h of holdings) {
+    if (h.market_value != null) total_value += h.market_value;
+    if (h.cost_basis_total != null) total_invested += h.cost_basis_total;
+    if (h.prediction?.predicted_direction === "bullish") bullish_count++;
+    if (h.prediction?.predicted_direction === "bearish") bearish_count++;
+  }
+
+  const total_pnl = total_value - total_invested;
+  const total_pnl_pct =
+    total_invested > 0 ? (total_pnl / total_invested) * 100 : 0;
+
+  return { total_value, total_invested, total_pnl, total_pnl_pct, bullish_count, bearish_count };
+}
+
+function fmtUSD(v: number | null): string {
+  if (v == null) return "—";
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(v);
+}
+
+function fmtPct(v: number | null, showPlus = true): string {
+  if (v == null) return "—";
+  const sign = showPlus && v > 0 ? "+" : "";
+  return `${sign}${v.toFixed(2)}%`;
+}
+
+function pnlColor(v: number | null): string {
+  if (v == null) return "text-slate-500";
+  if (v > 0) return "text-emerald-400";
+  if (v < 0) return "text-red-400";
+  return "text-slate-400";
+}
+
+function dirBadge(d: string | undefined) {
+  if (d === "bullish") return { label: "Bullish", cls: "bg-emerald-500/15 text-emerald-400 border-emerald-500/25" };
+  if (d === "bearish") return { label: "Bearish", cls: "bg-red-500/15 text-red-400 border-red-500/25" };
+  return { label: "Neutral", cls: "bg-slate-500/15 text-slate-400 border-slate-500/25" };
+}
+
+function recoBadge(r: string | undefined) {
+  if (r === "buy")  return { label: "BUY",  cls: "bg-emerald-500/15 text-emerald-400 border-emerald-500/25" };
+  if (r === "sell") return { label: "SELL", cls: "bg-red-500/15 text-red-400 border-red-500/25" };
+  return { label: "WAIT", cls: "bg-slate-500/15 text-slate-400 border-slate-500/25" };
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function SummaryCard({ label, value, sub, subColor }: {
+  label: string;
+  value: string;
+  sub?: string;
+  subColor?: string;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const { holding, prediction, latestClose } = detail;
-  const shares = holding.shares_owned;
-  const costBasis = holding.average_cost_basis;
-  const currentValue = latestClose != null ? latestClose * shares : null;
-  const totalCost    = costBasis != null ? costBasis * shares : null;
-  const pnl          = currentValue != null && totalCost != null ? currentValue - totalCost : null;
-  const pnlPct       = pnl != null && totalCost && totalCost > 0 ? (pnl / totalCost) * 100 : null;
-  const dayChangePct = detail.prices.length >= 2
-    ? ((detail.prices[detail.prices.length - 1].close - detail.prices[detail.prices.length - 2].close)
-       / detail.prices[detail.prices.length - 2].close) * 100
-    : null;
-
-  const dir    = prediction?.predicted_direction;
-  const dirCol = dirColor(dir);
-  const noData = prediction?.model_version === "no-data-v0";
-
   return (
-    <div className={`pf-holding ${expanded ? "pf-holding-open" : ""}`}>
-      {/* Summary row — always visible */}
-      <div className="pf-holding-summary" onClick={() => setExpanded(v => !v)}>
-        <div className="pf-holding-id">
-          <span className="pf-holding-symbol">{holding.symbol}</span>
-          <span className="pf-holding-name">{holding.company_name}</span>
-        </div>
-
-        <div className="pf-holding-stat">
-          <span className="pf-stat-label">Shares</span>
-          <span className="pf-stat-value">{shares.toLocaleString(undefined, { maximumFractionDigits: 4 })}</span>
-        </div>
-
-        <div className="pf-holding-stat">
-          <span className="pf-stat-label">Price</span>
-          <span className="pf-stat-value">{latestClose != null ? fmtMoney(latestClose) : "—"}</span>
-          {dayChangePct != null && (
-            <span className="pf-stat-sub" style={{ color: pnlColor(dayChangePct) }}>
-              {fmtPct(dayChangePct)} today
-            </span>
-          )}
-        </div>
-
-        <div className="pf-holding-stat">
-          <span className="pf-stat-label">Mkt Value</span>
-          <span className="pf-stat-value">{currentValue != null ? fmtMoney(currentValue) : "—"}</span>
-          {totalCost != null && (
-            <span className="pf-stat-sub" style={{ color: "#64748b" }}>
-              Cost {fmtMoney(totalCost)}
-            </span>
-          )}
-        </div>
-
-        <div className="pf-holding-stat">
-          <span className="pf-stat-label">Total P&L</span>
-          {pnl != null ? (
-            <>
-              <span className="pf-stat-value" style={{ color: pnlColor(pnl) }}>
-                {pnl >= 0 ? "+" : ""}{fmtMoney(pnl)}
-              </span>
-              {pnlPct != null && (
-                <span className="pf-stat-sub" style={{ color: pnlColor(pnl) }}>
-                  {fmtPct(pnlPct)}
-                </span>
-              )}
-            </>
-          ) : <span className="pf-stat-value">—</span>}
-        </div>
-
-        <div className="pf-holding-stat">
-          <span className="pf-stat-label">Outlook</span>
-          {prediction && !noData ? (
-            <span className="pf-stat-value" style={{ color: dirCol, textTransform: "capitalize" }}>
-              {dir}
-            </span>
-          ) : <span className="pf-stat-value" style={{ color: "#374151" }}>—</span>}
-          {prediction && !noData && (
-            <span className="pf-stat-sub" style={{ color: dirCol, opacity: 0.8 }}>
-              {(prediction.confidence_score * 100).toFixed(0)}% conf
-            </span>
-          )}
-        </div>
-
-        <div className="pf-holding-actions">
-          <button className="pf-expand-btn" aria-label={expanded ? "Collapse" : "Expand"}>
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={1.8}>
-              {expanded ? <path d="M2 8L6 4L10 8"/> : <path d="M2 4L6 8L10 4"/>}
-            </svg>
-          </button>
-          <button className="pf-delete-btn" onClick={e => { e.stopPropagation(); onDelete(holding.id); }}
-            aria-label={`Remove ${holding.symbol}`}>
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth={1.8}>
-              <path d="M2 2L10 10M10 2L2 10"/>
-            </svg>
-          </button>
-        </div>
-      </div>
-
-      {/* Expanded detail */}
-      {expanded && (
-        <div className="pf-holding-detail">
-          <div className="pf-detail-grid">
-            {/* Chart + side stats */}
-            <div className="pf-chart-col">
-              <PositionChart detail={detail} />
-              {prediction && !noData && (
-                <div className="pf-chart-legend">
-                  <span><span className="pf-legend-dot" style={{ background: "#60a5fa" }} />Price history</span>
-                  <span><span className="pf-legend-dot" style={{ background: dirCol, opacity: 0.6 }} />ML projection</span>
-                  {holding.average_cost_basis && (
-                    <span><span className="pf-legend-dash" />Cost basis</span>
-                  )}
-                </div>
-              )}
-            </div>
-
-            {/* Right panel */}
-            <div className="pf-stats-col">
-              <div className="pf-stats-section">
-                <div className="pf-stats-label">Position</div>
-                <div className="pf-stats-row">
-                  <span>Shares owned</span>
-                  <span>{shares.toLocaleString(undefined, { maximumFractionDigits: 6 })}</span>
-                </div>
-                <div className="pf-stats-row">
-                  <span>Avg cost / share</span>
-                  <span>{costBasis != null ? fmtMoney(costBasis) : "—"}</span>
-                </div>
-                <div className="pf-stats-row">
-                  <span>Current price</span>
-                  <span>{latestClose != null ? fmtMoney(latestClose) : "—"}</span>
-                </div>
-                <div className="pf-stats-row pf-stats-row-divider">
-                  <span>Amount invested</span>
-                  <span className="pf-stats-highlight">{totalCost != null ? fmtMoney(totalCost) : "—"}</span>
-                </div>
-                <div className="pf-stats-row">
-                  <span>Current value</span>
-                  <span className="pf-stats-highlight">{currentValue != null ? fmtMoney(currentValue) : "—"}</span>
-                </div>
-                <div className="pf-stats-row">
-                  <span>Gain / Loss $</span>
-                  <span style={{ color: pnl != null ? pnlColor(pnl) : "#64748b" }}>
-                    {pnl != null ? `${pnl >= 0 ? "+" : ""}${fmtMoney(pnl)}` : "—"}
-                  </span>
-                </div>
-                <div className="pf-stats-row">
-                  <span>Gain / Loss %</span>
-                  <span style={{ color: pnlPct != null ? pnlColor(pnlPct) : "#64748b" }}>
-                    {pnlPct != null ? fmtPct(pnlPct) : "—"}
-                  </span>
-                </div>
-              </div>
-
-              {prediction && !noData && (
-                <div className="pf-stats-section pf-stats-section-mt">
-                  <div className="pf-stats-label">ML Outlook (5d)</div>
-                  <div className="pf-stats-row">
-                    <span>Direction</span>
-                    <span style={{ color: dirCol, textTransform: "capitalize", fontWeight: 600 }}>{dir}</span>
-                  </div>
-                  <div className="pf-stats-row">
-                    <span>Projected return</span>
-                    <span style={{ color: dirCol }}>
-                      {fmtPct(prediction.predicted_return_pct)}
-                    </span>
-                  </div>
-                  <div className="pf-stats-row">
-                    <span>Confidence</span>
-                    <span>{(prediction.confidence_score * 100).toFixed(1)}%</span>
-                  </div>
-                  <div className="pf-stats-row">
-                    <span>Signal</span>
-                    <span style={{
-                      color: prediction.recommendation === "buy"  ? "#4ade80" :
-                             prediction.recommendation === "sell" ? "#f87171" : "#94a3b8",
-                      fontWeight: 600, letterSpacing: "0.06em",
-                    }}>
-                      {prediction.recommendation.toUpperCase()}
-                    </span>
-                  </div>
-                  {latestClose != null && (
-                    <div className="pf-stats-row pf-stats-row-divider">
-                      <span>Projected value</span>
-                      <span style={{ color: dirCol }}>
-                        {fmtMoney(latestClose * shares * (1 + prediction.predicted_return_pct / 100))}
-                      </span>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+    <div className="rounded-xl border border-white/8 bg-white/5 p-4">
+      <p className="text-xs text-slate-500 uppercase tracking-widest mb-1">{label}</p>
+      <p className="text-2xl font-bold font-mono text-white">{value || "\u200b"}</p>
+      {sub && (
+        <p className={`text-sm mt-0.5 font-mono ${subColor ?? "text-slate-400"}`}>{sub}</p>
       )}
     </div>
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Add holding form
-// ─────────────────────────────────────────────────────────────────────────────
-function AddHoldingForm({ onAdded }: { onAdded: () => void }) {
-  const [sym, setSym]    = useState("");
-  const [shares, setShares] = useState("");
-  const [cost, setCost]  = useState("");
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
+function HoldingRow({ h, onDelete }: { h: EnrichedHolding; onDelete: (id: string) => void }) {
+  const [confirming, setConfirming] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!sym || !shares) return;
-    setSaving(true); setError("");
+  const dir = dirBadge(h.prediction?.predicted_direction);
+  const reco = recoBadge(h.prediction?.recommendation);
+
+  async function handleDelete() {
+    if (!confirming) { setConfirming(true); return; }
+    setDeleting(true);
     try {
-      const payload: Record<string, unknown> = {
-        symbol: sym.trim().toUpperCase(),
-        shares_owned: Number(shares),
-      };
-      if (cost.trim()) payload.average_cost_basis = Number(cost);
-      await post("/api/v1/holdings/by-symbol", payload);
-      setSym(""); setShares(""); setCost("");
-      onAdded();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Failed to save");
+      const res = await fetch(`${API}/api/v1/holdings/${h.id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      if (res.ok) onDelete(h.id);
+    } finally {
+      setDeleting(false);
+      setConfirming(false);
     }
-    setSaving(false);
   }
 
   return (
-    <form className="pf-add-form" onSubmit={handleSubmit}>
-      <div className="pf-add-title">Add / Update Position</div>
-      <div className="pf-add-grid">
-        <div className="pf-field">
-          <label className="pf-field-label">Symbol</label>
-          <input className="pf-input" placeholder="AAPL" value={sym}
-            onChange={e => setSym(e.target.value.toUpperCase())} required />
+    <div className="grid grid-cols-[1fr_auto] items-center gap-4 rounded-xl border border-white/8 bg-white/5 px-5 py-4 hover:bg-white/8 transition-colors">
+      {/* Left: identity + P&L */}
+      <div className="grid gap-3 sm:grid-cols-[180px_1fr_1fr_1fr]">
+        {/* Identity */}
+        <div className="flex flex-col gap-0.5">
+          <a
+            href={`/ticker/${h.symbol}`}
+            className="font-mono text-base font-semibold text-white hover:text-blue-400 transition-colors"
+          >
+            {h.symbol}
+          </a>
+          <span className="text-xs text-slate-500 truncate">{h.company_name}</span>
+          <span className="text-xs text-slate-600 font-mono">
+            {h.shares_owned.toLocaleString(undefined, { maximumFractionDigits: 4 })} shares
+          </span>
         </div>
-        <div className="pf-field">
-          <label className="pf-field-label">Shares</label>
-          <input className="pf-input" type="number" min="0" step="0.0001"
-            placeholder="10" value={shares} onChange={e => setShares(e.target.value)} required />
-        </div>
-        <div className="pf-field pf-field-full">
-          <label className="pf-field-label">Avg Purchase Price <span className="pf-optional">(optional)</span></label>
-          <input className="pf-input" type="number" min="0" step="0.01"
-            placeholder="185.50" value={cost} onChange={e => setCost(e.target.value)} />
-        </div>
-      </div>
-      {error && <p className="pf-error">{error}</p>}
-      <button className="pf-submit-btn" type="submit" disabled={saving}>
-        {saving ? "Saving…" : "Save Position"}
-      </button>
-    </form>
-  );
-}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Main page
-// ─────────────────────────────────────────────────────────────────────────────
-export default function ProfilePage() {
-  const [user, setUser]           = useState<User | null>(null);
-  const [details, setDetails]     = useState<HoldingDetail[]>([]);
-  const [loading, setLoading]     = useState(true);
-  const [authChecked, setAuthChecked] = useState(false);
-
-  const loadPortfolio = useCallback(async () => {
-    setLoading(true);
-    try {
-      const holdingsData = await get("/api/v1/holdings");
-      const holdings: Holding[] = holdingsData.holdings ?? [];
-
-      const detailList = await Promise.all(
-        holdings.map(async (h): Promise<HoldingDetail> => {
-          const [histRes, predRes] = await Promise.allSettled([
-            get(`/api/v1/tickers/${h.symbol}/history?limit=90`),
-            get(`/api/v1/tickers/${h.symbol}/prediction?horizon_days=5`),
-          ]);
-
-          const prices: PriceBar[] =
-            histRes.status === "fulfilled" ? (histRes.value.prices ?? []).sort(
-              (a: PriceBar, b: PriceBar) => a.trading_date.localeCompare(b.trading_date)
-            ) : [];
-
-          const prediction: Prediction | null =
-            predRes.status === "fulfilled" ? predRes.value : null;
-
-          const latestClose = prices.length ? prices[prices.length - 1].close : null;
-
-          return { holding: h, prices, prediction, latestClose };
-        })
-      );
-
-      setDetails(detailList);
-    } catch {}
-    setLoading(false);
-  }, []);
-
-  useEffect(() => {
-    get("/api/v1/auth/me")
-      .then(d => { setUser({ id: d.id, email: d.email }); setAuthChecked(true); })
-      .catch(() => setAuthChecked(true));
-  }, []);
-
-  useEffect(() => {
-    if (user) loadPortfolio();
-    else if (authChecked) setLoading(false);
-  }, [user, authChecked, loadPortfolio]);
-
-  async function handleDelete(id: string) {
-    await del(`/api/v1/holdings/${id}`);
-    setDetails(prev => prev.filter(d => d.holding.id !== id));
-  }
-
-  // Portfolio summary stats
-  const totalValue    = details.reduce((s, d) => s + (d.latestClose ?? 0) * d.holding.shares_owned, 0);
-  const totalCost     = details.reduce((s, d) => {
-    const cb = d.holding.average_cost_basis;
-    return s + (cb != null ? cb * d.holding.shares_owned : 0);
-  }, 0);
-  const totalPnL      = totalValue - totalCost;
-  const totalPnLPct   = totalCost > 0 ? (totalPnL / totalCost) * 100 : 0;
-  const dayChange     = details.reduce((s, d) => {
-    if (d.prices.length < 2) return s;
-    const prev = d.prices[d.prices.length - 2].close;
-    const curr = d.prices[d.prices.length - 1].close;
-    return s + (curr - prev) * d.holding.shares_owned;
-  }, 0);
-
-  const bullCount  = details.filter(d => d.prediction?.predicted_direction === "bullish").length;
-  const bearCount  = details.filter(d => d.prediction?.predicted_direction === "bearish").length;
-
-  if (!authChecked) return <div className="pf-loading">Loading…</div>;
-
-  if (!user) return (
-    <div className="pf-unauth">
-      <p>Sign in to view your portfolio.</p>
-      <a href="/" className="pf-back-link">← Back to Markets</a>
-    </div>
-  );
-
-  return (
-    <div className="pf-page">
-      {/* Header */}
-      <div className="pf-header">
-        <div className="pf-header-left">
-          <a href="/" className="pf-back">← Markets</a>
-          <h1 className="pf-title">Portfolio</h1>
-          <p className="pf-subtitle">{user.email}</p>
-        </div>
-      </div>
-
-      {/* Summary strip */}
-      <div className="pf-summary-strip">
-        <div className="pf-summary-card pf-summary-card-main">
-          <div className="pf-summary-label">Total Value</div>
-          <div className="pf-summary-big">{fmtMoney(totalValue)}</div>
-          <div className="pf-summary-sub" style={{ color: pnlColor(totalPnL) }}>
-            {totalPnL >= 0 ? "+" : ""}{fmtMoney(totalPnL)} ({fmtPct(totalPnLPct)}) all-time
-          </div>
-        </div>
-        <div className="pf-summary-card">
-          <div className="pf-summary-label">Amount Invested</div>
-          <div className="pf-summary-mid">{fmtMoney(totalCost)}</div>
-          <div className="pf-summary-sub">{details.length} position{details.length !== 1 ? "s" : ""}</div>
-        </div>
-        <div className="pf-summary-card">
-          <div className="pf-summary-label">Today's Change</div>
-          <div className="pf-summary-mid" style={{ color: pnlColor(dayChange) }}>
-            {dayChange >= 0 ? "+" : ""}{fmtMoney(dayChange)}
-          </div>
-          <div className="pf-summary-sub">across all positions</div>
-        </div>
-        <div className="pf-summary-card">
-          <div className="pf-summary-label">ML Signals</div>
-          <div className="pf-summary-signals">
-            <span className="pf-signal-pill pf-signal-bull">{bullCount} Bullish</span>
-            <span className="pf-signal-pill pf-signal-bear">{bearCount} Bearish</span>
-          </div>
-          <div className="pf-summary-sub">{details.length - bullCount - bearCount} neutral / no data</div>
-        </div>
-      </div>
-
-      <div className="pf-body">
-        {/* Holdings table */}
-        <div className="pf-holdings-section">
-          <div className="pf-section-header">
-            <h2 className="pf-section-title">Positions</h2>
-            <span className="pf-section-count">{details.length} holdings</span>
-          </div>
-
-          {loading ? (
-            <div className="pf-skeleton-list">
-              {[1,2,3].map(i => <div key={i} className="pf-skeleton-row" />)}
-            </div>
-          ) : details.length === 0 ? (
-            <div className="pf-empty">
-              <p>No positions yet.</p>
-              <p className="pf-empty-sub">Add your first holding below to start tracking.</p>
-            </div>
-          ) : (
-            <div className="pf-holdings-list">
-              {/* Table header */}
-              <div className="pf-table-header">
-                <div>Symbol</div>
-                <div>Shares</div>
-                <div>Price</div>
-                <div>Market Value</div>
-                <div>Total P&L</div>
-                <div>Outlook</div>
-                <div></div>
-              </div>
-              {details.map(d => (
-                <HoldingRow key={d.holding.id} detail={d} onDelete={handleDelete} />
-              ))}
-            </div>
+        {/* Price + day change */}
+        <div className="flex flex-col gap-0.5 justify-center">
+          <span className="text-xs text-slate-500 uppercase tracking-wider">Current price</span>
+          <span className="font-mono text-sm text-white">{fmtUSD(h.latest_close)}</span>
+          {h.day_change_pct != null && (
+            <span className={`font-mono text-xs ${pnlColor(h.day_change_pct)}`}>
+              {fmtPct(h.day_change_pct)} today
+            </span>
           )}
         </div>
 
-        {/* Add holding */}
-        <AddHoldingForm onAdded={loadPortfolio} />
+        {/* Market value */}
+        <div className="flex flex-col gap-0.5 justify-center">
+          <span className="text-xs text-slate-500 uppercase tracking-wider">Market value</span>
+          <span className="font-mono text-sm text-white">{fmtUSD(h.market_value)}</span>
+          {h.average_cost_basis != null && (
+            <span className="font-mono text-xs text-slate-500">
+              Cost basis {fmtUSD(h.cost_basis_total)}
+            </span>
+          )}
+        </div>
+
+        {/* Unrealized P&L */}
+        <div className="flex flex-col gap-0.5 justify-center">
+          <span className="text-xs text-slate-500 uppercase tracking-wider">Unrealized P&L</span>
+          <span className={`font-mono text-sm font-semibold ${pnlColor(h.unrealized_pnl)}`}>
+            {fmtUSD(h.unrealized_pnl)}
+          </span>
+          <span className={`font-mono text-xs ${pnlColor(h.unrealized_pnl_pct)}`}>
+            {fmtPct(h.unrealized_pnl_pct)}
+          </span>
+          {/* ML signal badges */}
+          {h.prediction && (
+            <div className="flex gap-1 mt-1">
+              <span className={`text-xs border rounded px-1.5 py-0.5 ${dir.cls}`}>{dir.label}</span>
+              <span className={`text-xs border rounded px-1.5 py-0.5 ${reco.cls}`}>{reco.label}</span>
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Right: delete */}
+      <button
+        onClick={handleDelete}
+        disabled={deleting}
+        className={`text-xs px-2 py-1 rounded-lg border transition-colors ${
+          confirming
+            ? "border-red-500/50 text-red-400 bg-red-500/10 hover:bg-red-500/20"
+            : "border-white/10 text-slate-500 hover:text-red-400 hover:border-red-500/30"
+        } disabled:opacity-40`}
+      >
+        {deleting ? "…" : confirming ? "Confirm?" : "Remove"}
+      </button>
     </div>
+  );
+}
+
+// ─── Main Page ────────────────────────────────────────────────────────────────
+
+export default function ProfilePage() {
+  const [userEmail, setUserEmail] = useState<string | null>(null);
+  const [holdings, setHoldings] = useState<EnrichedHolding[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  // New position form
+  const [formSymbol, setFormSymbol] = useState("");
+  const [formShares, setFormShares] = useState("");
+  const [formCost, setFormCost] = useState("");
+  const [formStatus, setFormStatus] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [formSaving, setFormSaving] = useState(false);
+
+  const loadHoldings = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const me = await fetchJSON<{ id: string; email: string }>("/api/v1/auth/me");
+      setUserEmail(me.email);
+
+      const raw = await fetchJSON<{ holdings: RawHolding[] }>("/api/v1/holdings");
+      const enriched = await Promise.all((raw.holdings ?? []).map(enrichHolding));
+      setHoldings(enriched);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load portfolio");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadHoldings(); }, [loadHoldings]);
+
+  function handleDelete(id: string) {
+    setHoldings((prev) => prev.filter((h) => h.id !== id));
+  }
+
+  async function handleAddPosition(e: React.FormEvent) {
+    e.preventDefault();
+    setFormSaving(true);
+    setFormStatus(null);
+    try {
+      const payload: Record<string, unknown> = {
+        symbol: formSymbol.trim().toUpperCase(),
+        shares_owned: Number(formShares),
+      };
+      if (formCost.trim()) payload.average_cost_basis = Number(formCost);
+
+      const res = await fetch(`${API}/api/v1/holdings/by-symbol`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setFormStatus({ ok: false, msg: res.status === 401 ? "Sign in first." : (data.error ?? "Failed") });
+        return;
+      }
+      setFormStatus({ ok: true, msg: `${formSymbol.toUpperCase()} saved` });
+      setFormSymbol(""); setFormShares(""); setFormCost("");
+      await loadHoldings();
+    } catch {
+      setFormStatus({ ok: false, msg: "Request failed" });
+    } finally {
+      setFormSaving(false);
+    }
+  }
+
+  const summary = computeSummary(holdings);
+
+  // ─── Render ─────────────────────────────────────────────────────────────────
+
+  return (
+    <main className="min-h-screen px-4 py-10 sm:px-6">
+      <div className="mx-auto max-w-5xl">
+
+        {/* Header */}
+        <a href="/" className="text-sm text-slate-400 hover:text-white transition-colors">
+          ← Markets
+        </a>
+
+        <div className="mt-6 mb-8">
+          <h1 className="text-3xl font-bold tracking-tight text-white">Portfolio</h1>
+          {userEmail && (
+            <p className="mt-1 text-sm text-slate-500">{userEmail}</p>
+          )}
+        </div>
+
+        {/* Loading / error states */}
+        {loading && (
+          <div className="flex items-center gap-3 text-slate-400 text-sm py-12 justify-center">
+            <span className="animate-spin inline-block w-4 h-4 border-2 border-slate-600 border-t-blue-400 rounded-full" />
+            Loading portfolio…
+          </div>
+        )}
+
+        {!loading && error && (
+          <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-5 text-sm text-red-300 mb-6">
+            {error === "401 Unauthorized"
+              ? "Sign in via the menu (top right) to see your portfolio."
+              : error}
+          </div>
+        )}
+
+        {!loading && !error && (
+          <>
+            {/* Summary cards */}
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 mb-8">
+              <SummaryCard
+                label="Total value"
+                value={fmtUSD(summary.total_value)}
+                sub={`${fmtPct(summary.total_pnl_pct)} all-time`}
+                subColor={pnlColor(summary.total_pnl_pct)}
+              />
+              <SummaryCard
+                label="Amount invested"
+                value={fmtUSD(summary.total_invested)}
+                sub={`${holdings.length} position${holdings.length !== 1 ? "s" : ""}`}
+              />
+              <SummaryCard
+                label="Today's change"
+                value={(() => {
+                  const withDay = holdings.filter((h) => h.day_change_pct != null && h.market_value != null);
+                  if (!withDay.length) return "—";
+                  const totalDay = withDay.reduce((acc, h) => acc + (h.market_value! * h.day_change_pct! / 100), 0);
+                  return fmtUSD(totalDay);
+                })()}
+                sub="across all positions"
+              />
+              {/* ML signals card */}
+              <div className="rounded-xl border border-white/8 bg-white/5 p-4">
+                <p className="text-xs text-slate-500 uppercase tracking-widest mb-2">ML signals</p>
+                <div className="flex flex-wrap gap-1.5">
+                  <span className="text-xs border rounded px-2 py-0.5 bg-emerald-500/15 text-emerald-400 border-emerald-500/25">
+                    {summary.bullish_count} Bullish
+                  </span>
+                  <span className="text-xs border rounded px-2 py-0.5 bg-red-500/15 text-red-400 border-red-500/25">
+                    {summary.bearish_count} Bearish
+                  </span>
+                </div>
+                <p className="text-xs text-slate-600 mt-1.5">
+                  {holdings.length - summary.bullish_count - summary.bearish_count} neutral / no data
+                </p>
+              </div>
+            </div>
+
+            {/* Holdings */}
+            <section className="mb-10">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-semibold text-white">Positions</h2>
+                <span className="text-sm text-slate-500">{holdings.length} holding{holdings.length !== 1 ? "s" : ""}</span>
+              </div>
+
+              {holdings.length === 0 ? (
+                <div className="rounded-2xl border border-white/8 bg-white/5 p-10 text-center text-slate-500">
+                  <p className="text-base">No positions yet.</p>
+                  <p className="mt-1 text-sm">Add your first holding below to start tracking.</p>
+                </div>
+              ) : (
+                <div className="flex flex-col gap-3">
+                  {holdings.map((h) => (
+                    <HoldingRow key={h.id} h={h} onDelete={handleDelete} />
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {/* Add / Update Position form */}
+            <section className="rounded-2xl border border-white/8 bg-white/5 p-6">
+              <h2 className="text-lg font-semibold text-white mb-1">Add / Update Position</h2>
+              <p className="text-sm text-slate-500 mb-5">
+                Adding a symbol that already exists in your portfolio will update shares and cost basis.
+              </p>
+
+              <form onSubmit={handleAddPosition}>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <label className="grid gap-1.5">
+                    <span className="text-xs text-slate-400 uppercase tracking-wider">Symbol</span>
+                    <input
+                      type="text"
+                      value={formSymbol}
+                      onChange={(e) => setFormSymbol(e.target.value.toUpperCase())}
+                      placeholder="AAPL"
+                      required
+                      className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-white font-mono placeholder:text-slate-700 outline-none focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/10 transition-all"
+                    />
+                  </label>
+
+                  <label className="grid gap-1.5">
+                    <span className="text-xs text-slate-400 uppercase tracking-wider">Shares</span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.000001"
+                      value={formShares}
+                      onChange={(e) => setFormShares(e.target.value)}
+                      placeholder="10"
+                      required
+                      className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-white font-mono placeholder:text-slate-700 outline-none focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/10 transition-all"
+                    />
+                  </label>
+
+                  <label className="grid gap-1.5">
+                    <span className="text-xs text-slate-400 uppercase tracking-wider">
+                      Avg. purchase price <span className="text-slate-600 normal-case">(optional)</span>
+                    </span>
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.000001"
+                      value={formCost}
+                      onChange={(e) => setFormCost(e.target.value)}
+                      placeholder="185.50"
+                      className="rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-white font-mono placeholder:text-slate-700 outline-none focus:border-blue-500/50 focus:ring-2 focus:ring-blue-500/10 transition-all"
+                    />
+                  </label>
+                </div>
+
+                <div className="mt-4 flex items-center gap-4">
+                  <button
+                    type="submit"
+                    disabled={formSaving}
+                    className="rounded-xl bg-white px-5 py-2 text-sm font-medium text-slate-900 hover:bg-slate-100 disabled:opacity-50 transition-colors"
+                  >
+                    {formSaving ? "Saving…" : "Save Position"}
+                  </button>
+                  {formStatus && (
+                    <p className={`text-sm ${formStatus.ok ? "text-emerald-400" : "text-red-400"}`}>
+                      {formStatus.msg}
+                    </p>
+                  )}
+                </div>
+              </form>
+            </section>
+          </>
+        )}
+      </div>
+    </main>
   );
 }
