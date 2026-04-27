@@ -9,6 +9,7 @@ class PredictRequest(BaseModel):
 
 class PredictResponse(BaseModel):
     symbol: str
+    horizon_days: int
     predicted_direction: Literal["bullish", "neutral", "bearish"]
     predicted_return_pct: float
     confidence_score: float
