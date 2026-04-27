@@ -7,6 +7,7 @@ class Settings:
     db_name: str = os.getenv("ML_DB_NAME", "investify")
     db_user: str = os.getenv("ML_DB_USER", "investify")
     db_password: str = os.getenv("ML_DB_PASSWORD", "investify")
+    internal_token: str = os.getenv("ML_INTERNAL_TOKEN", "dev-ml-internal-token")
 
     @property
     def dsn(self) -> str:

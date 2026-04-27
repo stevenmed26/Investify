@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from app.security import verify_internal_token
 from app.services.model_store import load_model_bundle, model_exists
 
 
@@ -9,7 +10,7 @@ router = APIRouter()
 
 
 @router.get("/models/current")
-def get_current_model():
+def get_current_model(_verified: None = Depends(verify_internal_token)):
     if not model_exists():
         return {"exists": False}
 
