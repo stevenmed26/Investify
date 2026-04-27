@@ -6,9 +6,9 @@ import SeedHistoryButton from "../../components/SeedHistoryButton";
 import TrainModelButton from "../../components/TrainModelButton";
 import { notFound } from "next/navigation";
 
-const API_BASE_URL =
-  process.env.INTERNAL_API_BASE_URL ?? "http://api:8080";
-const ML_BASE_URL = "http://ml-service:8000";
+const API_BASE_URL = process.env.INTERNAL_API_BASE_URL ?? "http://api:8080";
+const ML_BASE_URL = process.env.INTERNAL_ML_BASE_URL ?? "http://localhost:8000";
+const ML_TOKEN = process.env.INTERNAL_ML_TOKEN ?? "dev-ml-internal-token";
 
 type Ticker = {
   id: string;
@@ -20,6 +20,7 @@ type Ticker = {
 
 type Prediction = {
   symbol: string;
+  horizon_days?: number;
   predicted_direction: "bullish" | "neutral" | "bearish";
   predicted_return_pct: number;
   confidence_score: number;
@@ -65,7 +66,8 @@ type CurrentModel = {
   metadata?: {
     version?: string;
     model_type?: string;
-    symbol?: string;
+    scope?: string;
+    tickers?: string[];
   };
   metrics?: {
     accuracy?: number;
@@ -74,6 +76,7 @@ type CurrentModel = {
     test_rows?: number;
   };
   labels?: string[];
+  horizon_days?: number;
 };
 
 async function getTicker(symbol: string): Promise<Ticker | null> {
@@ -94,10 +97,9 @@ async function getTicker(symbol: string): Promise<Ticker | null> {
 
 async function getPrediction(symbol: string): Promise<Prediction | null> {
   try {
-    const res = await fetch(
-      `${API_BASE_URL}/api/v1/tickers/${symbol}/prediction?horizon_days=5`,
-      { cache: "no-store" }
-    );
+    const res = await fetch(`${API_BASE_URL}/api/v1/tickers/${symbol}/prediction?horizon_days=5`, {
+      cache: "no-store",
+    });
 
     if (!res.ok) {
       return null;
@@ -111,10 +113,9 @@ async function getPrediction(symbol: string): Promise<Prediction | null> {
 
 async function getHistory(symbol: string): Promise<HistoricalPrice[]> {
   try {
-    const res = await fetch(
-      `${API_BASE_URL}/api/v1/tickers/${symbol}/history?limit=180`,
-      { cache: "no-store" }
-    );
+    const res = await fetch(`${API_BASE_URL}/api/v1/tickers/${symbol}/history?limit=180`, {
+      cache: "no-store",
+    });
 
     if (!res.ok) {
       return [];
@@ -129,10 +130,9 @@ async function getHistory(symbol: string): Promise<HistoricalPrice[]> {
 
 async function getFeatures(symbol: string): Promise<FeatureRow[]> {
   try {
-    const res = await fetch(
-      `${API_BASE_URL}/api/v1/tickers/${symbol}/features?limit=10`,
-      { cache: "no-store" }
-    );
+    const res = await fetch(`${API_BASE_URL}/api/v1/tickers/${symbol}/features?limit=10`, {
+      cache: "no-store",
+    });
 
     if (!res.ok) {
       return [];
@@ -149,6 +149,9 @@ async function getCurrentModel(): Promise<CurrentModel | null> {
   try {
     const res = await fetch(`${ML_BASE_URL}/models/current`, {
       cache: "no-store",
+      headers: {
+        "X-Internal-Token": ML_TOKEN,
+      },
     });
 
     if (!res.ok) {
@@ -195,7 +198,7 @@ export default async function TickerDetailPage({
     <main className="min-h-screen px-6 py-10">
       <div className="mx-auto max-w-6xl">
         <a href="/" className="text-sm text-slate-300 hover:text-white">
-          ← Back
+          {"<-"} Back
         </a>
 
         <div className="mt-6 flex flex-col gap-3">
@@ -218,12 +221,16 @@ export default async function TickerDetailPage({
                     trading_date: p.trading_date,
                     close: p.close,
                   }))}
-                  prediction={prediction ? {
-                    predicted_direction: prediction.predicted_direction,
-                    predicted_return_pct: prediction.predicted_return_pct,
-                    confidence_score: prediction.confidence_score,
-                    horizon_days: 5,
-                  } : null}
+                  prediction={
+                    prediction
+                      ? {
+                          predicted_direction: prediction.predicted_direction,
+                          predicted_return_pct: prediction.predicted_return_pct,
+                          confidence_score: prediction.confidence_score,
+                          horizon_days: prediction.horizon_days,
+                        }
+                      : null
+                  }
                 />
               ) : (
                 <p className="text-slate-300">
@@ -276,6 +283,9 @@ export default async function TickerDetailPage({
                     <div className="mt-2 text-sm text-slate-400">
                       Model version: {prediction.model_version}
                     </div>
+                    <div className="mt-1 text-sm text-slate-400">
+                      Horizon: {prediction.horizon_days ?? 5} trading days
+                    </div>
                   </div>
 
                   {prediction.explanation?.class_probabilities ? (
@@ -306,7 +316,7 @@ export default async function TickerDetailPage({
                       <h3 className="text-lg font-semibold">Signals</h3>
                       <ul className="mt-3 space-y-2 text-sm text-slate-300">
                         {(prediction.explanation?.signals ?? []).map((signal) => (
-                          <li key={signal}>• {signal}</li>
+                          <li key={signal}>- {signal}</li>
                         ))}
                       </ul>
                     </div>
@@ -315,7 +325,7 @@ export default async function TickerDetailPage({
                       <h3 className="text-lg font-semibold">Risk Factors</h3>
                       <ul className="mt-3 space-y-2 text-sm text-slate-300">
                         {(prediction.explanation?.risk_factors ?? []).map((risk) => (
-                          <li key={risk}>• {risk}</li>
+                          <li key={risk}>- {risk}</li>
                         ))}
                       </ul>
                     </div>
@@ -336,16 +346,18 @@ export default async function TickerDetailPage({
                   <div className="mt-4 space-y-2 text-sm text-slate-300">
                     <p>Version: {currentModel.metadata?.version}</p>
                     <p>Type: {currentModel.metadata?.model_type}</p>
-                    <p>Scope: {currentModel.metadata?.symbol}</p>
+                    <p>Scope: {currentModel.metadata?.scope ?? "ALL"}</p>
+                    <p>Tickers: {currentModel.metadata?.tickers?.length ?? 0}</p>
+                    <p>Horizon: {currentModel.horizon_days ?? 5} trading days</p>
                     <p>
                       Accuracy:{" "}
                       {currentModel.metrics?.accuracy !== undefined
                         ? `${(currentModel.metrics.accuracy * 100).toFixed(1)}%`
-                        : "—"}
+                        : "-"}
                     </p>
-                    <p>Rows: {currentModel.metrics?.rows ?? "—"}</p>
-                    <p>Train rows: {currentModel.metrics?.train_rows ?? "—"}</p>
-                    <p>Test rows: {currentModel.metrics?.test_rows ?? "—"}</p>
+                    <p>Rows: {currentModel.metrics?.rows ?? "-"}</p>
+                    <p>Train rows: {currentModel.metrics?.train_rows ?? "-"}</p>
+                    <p>Test rows: {currentModel.metrics?.test_rows ?? "-"}</p>
                   </div>
                 ) : (
                   <p className="mt-4 text-sm text-slate-300">
