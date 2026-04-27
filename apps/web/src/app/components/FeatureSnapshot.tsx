@@ -17,7 +17,7 @@ type Props = {
 
 function formatNumber(value?: number | null, digits = 2) {
   if (value === null || value === undefined) {
-    return "—";
+    return "-";
   }
   return value.toFixed(digits);
 }

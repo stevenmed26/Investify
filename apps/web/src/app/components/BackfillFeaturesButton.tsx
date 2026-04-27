@@ -29,7 +29,11 @@ export default function BackfillFeaturesButton({ symbol }: Props) {
       const data = await res.json().catch(() => null);
 
       if (!res.ok) {
-        setStatus(data?.error ?? data?.detail ?? "Unauthorized");
+        if (res.status === 403) {
+          setStatus("Admin access is required to refresh shared feature data.");
+        } else {
+          setStatus(data?.error ?? data?.detail ?? "Unauthorized");
+        }
         return;
       }
 
