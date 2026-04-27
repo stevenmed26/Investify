@@ -19,23 +19,10 @@ RAW_INDICATOR_COLUMNS = [
     "momentum_5d",
     "momentum_20d",
     "volatility_20d",
+    "volume_ratio_20d",
 ]
 
-# The actual model feature set — every column here must be dimensionless
-# (scale-invariant across tickers) so that a StandardScaler fitted on
-# mixed AAPL/NVDA training data produces meaningful z-scores at inference.
-#
-# Removed from previous version:
-#   sma_20, sma_50, ema_12, ema_26 — raw dollar prices (5-100x range across tickers)
-#   macd (raw)    — ema_12 - ema_26 in dollars, same scale problem
-#   ema_gap       — duplicate of macd, also dollar-denominated
-#
-# What remains or was added:
-#   price_vs_sma20/50  — (close/sma) - 1, dimensionless ratio
-#   macd_pct           — macd / close, normalises MACD to % of price
-#   rsi_14             — already 0-100 bounded, fine
-#   momentum_5d/20d    — ((price/prev)-1)*100, already a % return
-#   volatility_20d     — annualised % vol, already dimensionless
+
 ALL_MODEL_FEATURES = [
     "rsi_14",
     "momentum_5d",
@@ -44,6 +31,7 @@ ALL_MODEL_FEATURES = [
     "price_vs_sma20",
     "price_vs_sma50",
     "macd_pct",
+    "volume_ratio_20d",
 ]
 
 
@@ -157,6 +145,7 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
                 tf.rsi_14, tf.macd,
                 tf.momentum_5d, tf.momentum_20d,
                 tf.volatility_20d,
+                tf.volume_ratio_20d,
                 hp.close,
                 LEAD(hp.close, %s) OVER (
                     PARTITION BY tf.ticker_id
@@ -174,6 +163,7 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
             sma_20, sma_50, ema_12, ema_26,
             rsi_14, macd,
             momentum_5d, momentum_20d, volatility_20d,
+            volume_ratio_20d,
             close, future_close
         FROM feature_prices
         ORDER BY symbol, trading_date
@@ -205,7 +195,7 @@ def load_training_dataframe(symbol: str | None = None, horizon_days: int = 5) ->
     # Drop rows where essential raw indicators are null — these can't produce
     # valid derived features. Use only the indicators that feed into model features.
     required_raw = ["rsi_14", "momentum_5d", "momentum_20d", "volatility_20d",
-                    "sma_20", "sma_50", "macd", "close"]
+                    "sma_20", "sma_50", "macd", "close", "volume_ratio_20d"]
     before = len(df)
     df = df.dropna(subset=required_raw).reset_index(drop=True)
     logger.debug("[dataset] dropped rows with null indicators before=%d after=%d", before, len(df))
@@ -256,6 +246,7 @@ def load_latest_feature_row(symbol: str) -> pd.DataFrame:
             tf.rsi_14, tf.macd,
             tf.momentum_5d, tf.momentum_20d,
             tf.volatility_20d,
+            tf.volume_ratio_20d,
             hp.close
         FROM technical_features tf
         JOIN tickers t ON t.id = tf.ticker_id

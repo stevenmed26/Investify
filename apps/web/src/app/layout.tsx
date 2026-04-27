@@ -1,6 +1,7 @@
 import "./globals.css";
 import type { Metadata } from "next";
 import { HamburgerMenu } from "./components/Hamburgermenu";
+import DevToolbar from "./components/DevToolBar";
 
 export const metadata: Metadata = {
   title: "Investify",
@@ -14,13 +15,12 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <header className="investify-navbar">
-          <a href="/" className="investify-navbar-brand">
-            Investify
-          </a>
+          <a href="/" className="investify-navbar-brand">Investify</a>
           <HamburgerMenu />
         </header>
         <div className="investify-navbar-spacer" />
         {children}
+        <DevToolbar />
       </body>
     </html>
   );

@@ -9,49 +9,58 @@ from app.schemas import PredictResponse
 from app.services.dataset import load_latest_feature_row
 from app.services.model_store import load_model_bundle
 
+
+
 logger = logging.getLogger(__name__)
 
 
-def predict_with_trained_model(symbol: str) -> PredictResponse | None:
-    bundle = load_model_bundle()
+def predict_with_trained_model(symbol: str, horizon_days: int) -> PredictResponse | None:
+    bundle = load_model_bundle(horizon_days=horizon_days)
     if not bundle:
-        logger.debug("[predictor] no trained model on disk — falling back to rules symbol=%s", symbol)
-        return None
-
-    model    = bundle["model"]
-    features = bundle["features"]
-    scope    = bundle.get("metadata", {}).get("scope", "?")
-    version  = bundle.get("metadata", {}).get("version", "ml-v0.4.0")
-
-    logger.info("[predictor] using trained model version=%s scope=%s symbol=%s", version, scope, symbol)
-
-    df = load_latest_feature_row(symbol)
-    if df.empty:
-        logger.warning(
-            "[predictor] no feature row available for symbol=%s — "
-            "falling back to rules (run backfill first)",
+        logger.debug(
+            "[predictor] no trained model on disk for horizon=%d - falling back to rules symbol=%s",
+            horizon_days,
             symbol,
         )
         return None
 
-    # Guard against a model trained with a different feature set (e.g. after
-    # a feature engineering change) being used without retraining.
+    model = bundle["model"]
+    features = bundle["features"]
+    scope = bundle.get("metadata", {}).get("scope", "?")
+    version = bundle.get("metadata", {}).get("version", "ml-v0.4.0")
+
+    logger.info(
+        "[predictor] using trained model version=%s scope=%s symbol=%s horizon_days=%d",
+        version,
+        scope,
+        symbol,
+        horizon_days,
+    )
+
+    df = load_latest_feature_row(symbol)
+    if df.empty:
+        logger.warning(
+            "[predictor] no feature row available for symbol=%s - falling back to rules (run backfill first)",
+            symbol,
+        )
+        return None
+
     missing = [f for f in features if f not in df.columns]
     if missing:
         logger.error(
-            "[predictor] model feature mismatch symbol=%s missing_cols=%s — "
-            "retrain the model",
-            symbol, missing,
+            "[predictor] model feature mismatch symbol=%s missing_cols=%s - retrain the model",
+            symbol,
+            missing,
         )
         return None
 
     X = df[features].copy()
 
-    probabilities   = model.predict_proba(X)[0]
-    classes         = model.classes_
-    prob_map        = {cls: float(prob) for cls, prob in zip(classes, probabilities)}
+    probabilities = model.predict_proba(X)[0]
+    classes = model.classes_
+    prob_map = {cls: float(prob) for cls, prob in zip(classes, probabilities)}
     predicted_class = str(model.predict(X)[0])
-    confidence      = round(float(np.max(probabilities)), 4)
+    confidence = round(float(np.max(probabilities)), 4)
 
     predicted_return_pct = 0.0
     if predicted_class == "bullish":
@@ -65,17 +74,11 @@ def predict_with_trained_model(symbol: str) -> PredictResponse | None:
     elif predicted_class == "bearish" and confidence >= 0.60:
         recommendation = "sell"
 
-    logger.info(
-        "[predictor] prediction symbol=%s direction=%s confidence=%.4f "
-        "return_pct=%.2f recommendation=%s version=%s",
-        symbol, predicted_class, confidence, predicted_return_pct, recommendation, version,
-    )
-    logger.debug("[predictor] class probabilities symbol=%s probs=%s", symbol, prob_map)
-
     explanation = build_explanation(df.iloc[0].to_dict(), prob_map)
 
     return PredictResponse(
         symbol=symbol.upper(),
+        horizon_days=horizon_days,
         predicted_direction=predicted_class,
         predicted_return_pct=predicted_return_pct,
         confidence_score=confidence,
@@ -85,19 +88,19 @@ def predict_with_trained_model(symbol: str) -> PredictResponse | None:
     )
 
 
-def build_explanation(row: dict[str, Any], prob_map: dict[str, float]) -> dict:
-    signals:      list[str] = []
+def build_explanation(row: dict[str, Any], prob_map: dict[str, float]) -> dict[str, Any]:
+    signals: list[str] = []
     risk_factors: list[str] = []
 
-    close         = row.get("close")
-    sma_20        = row.get("sma_20")
-    sma_50        = row.get("sma_50")
-    ema_12        = row.get("ema_12")
-    ema_26        = row.get("ema_26")
-    rsi_14        = row.get("rsi_14")
-    macd          = row.get("macd")
-    momentum_5d   = row.get("momentum_5d")
-    momentum_20d  = row.get("momentum_20d")
+    close = row.get("close")
+    sma_20 = row.get("sma_20")
+    sma_50 = row.get("sma_50")
+    ema_12 = row.get("ema_12")
+    ema_26 = row.get("ema_26")
+    rsi_14 = row.get("rsi_14")
+    macd = row.get("macd")
+    momentum_5d = row.get("momentum_5d")
+    momentum_20d = row.get("momentum_20d")
     volatility_20d = row.get("volatility_20d")
 
     if close is not None and sma_20 is not None and close > sma_20:
@@ -140,8 +143,8 @@ def build_explanation(row: dict[str, Any], prob_map: dict[str, float]) -> dict:
         risk_factors.append("20-day volatility is elevated")
 
     return {
-        "signals":       signals,
-        "risk_factors":  risk_factors,
+        "signals": signals,
+        "risk_factors": risk_factors,
         "class_probabilities": {
             "bullish": round(prob_map.get("bullish", 0.0), 4),
             "neutral": round(prob_map.get("neutral", 0.0), 4),

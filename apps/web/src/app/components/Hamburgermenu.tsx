@@ -1,18 +1,13 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 interface User {
   id: string;
   email: string;
+  role?: string;
 }
 
-// ---------------------------------------------------------------------------
-// API helpers
-// ---------------------------------------------------------------------------
 const API = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8080";
 
 async function apiPost(path: string, body: unknown) {
@@ -34,9 +29,6 @@ async function apiGet(path: string) {
   return data;
 }
 
-// ---------------------------------------------------------------------------
-// LoginCard
-// ---------------------------------------------------------------------------
 function LoginCard({
   user,
   onAuth,
@@ -54,10 +46,9 @@ function LoginCard({
     setError("");
     setLoading(true);
     try {
-      const path =
-        mode === "login" ? "/api/v1/auth/login" : "/api/v1/auth/register";
+      const path = mode === "login" ? "/api/v1/auth/login" : "/api/v1/auth/register";
       const data = await apiPost(path, { email, password });
-      onAuth({ id: data.id, email: data.email });
+      onAuth({ id: data.id, email: data.email, role: data.role });
       setEmail("");
       setPassword("");
     } catch (e: unknown) {
@@ -84,12 +75,13 @@ function LoginCard({
         <p className="hm-value" title={user.email}>
           {user.email}
         </p>
+        {user.role ? <p className="hm-hint">Role: {user.role}</p> : null}
         <button
           className="hm-btn hm-btn-ghost"
           onClick={handleLogout}
           disabled={loading}
         >
-          {loading ? "Signing out…" : "Sign out"}
+          {loading ? "Signing out..." : "Sign out"}
         </button>
       </div>
     );
@@ -100,13 +92,19 @@ function LoginCard({
       <div className="hm-tab-row">
         <button
           className={`hm-tab ${mode === "login" ? "hm-tab-active" : ""}`}
-          onClick={() => { setMode("login"); setError(""); }}
+          onClick={() => {
+            setMode("login");
+            setError("");
+          }}
         >
           Sign in
         </button>
         <button
           className={`hm-tab ${mode === "register" ? "hm-tab-active" : ""}`}
-          onClick={() => { setMode("register"); setError(""); }}
+          onClick={() => {
+            setMode("register");
+            setError("");
+          }}
         >
           Register
         </button>
@@ -136,15 +134,12 @@ function LoginCard({
         onClick={handleSubmit}
         disabled={loading}
       >
-        {loading ? "…" : mode === "login" ? "Sign in" : "Create account"}
+        {loading ? "..." : mode === "login" ? "Sign in" : "Create account"}
       </button>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// ApiKeyCard
-// ---------------------------------------------------------------------------
 function ApiKeyCard({ user }: { user: User | null }) {
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
@@ -152,7 +147,10 @@ function ApiKeyCard({ user }: { user: User | null }) {
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
 
   useEffect(() => {
-    if (!user) { setConfigured(null); return; }
+    if (!user) {
+      setConfigured(null);
+      return;
+    }
     apiGet("/api/v1/admin/provider-status")
       .then((d) => setConfigured(d.api_key_configured ?? false))
       .catch(() => setConfigured(false));
@@ -186,53 +184,48 @@ function ApiKeyCard({ user }: { user: User | null }) {
   return (
     <div className="hm-card">
       <div className="hm-status-row">
-        <p className="hm-label" style={{ flex: 1 }}>Twelve Data API Key</p>
+        <p className="hm-label" style={{ flex: 1 }}>
+          Twelve Data API Key
+        </p>
         <span className={`hm-dot ${configured ? "hm-dot-green" : "hm-dot-dim"}`} />
         <span className="hm-hint">
-          {configured === null ? "Checking…" : configured ? "Configured" : "Not set"}
+          {configured === null ? "Checking..." : configured ? "Configured" : "Not set"}
         </span>
       </div>
 
       <input
         className="hm-input"
         type="password"
-        placeholder={configured ? "Replace existing key…" : "Paste your API key…"}
+        placeholder={configured ? "Replace existing key..." : "Paste your API key..."}
         value={apiKey}
         onChange={(e) => setApiKey(e.target.value)}
         autoComplete="off"
       />
 
-      {message && (
-        <p className={message.ok ? "hm-success" : "hm-error"}>{message.text}</p>
-      )}
+      {message && <p className={message.ok ? "hm-success" : "hm-error"}>{message.text}</p>}
 
       <button
         className="hm-btn hm-btn-primary"
         onClick={handleSave}
         disabled={saving || !apiKey.trim()}
       >
-        {saving ? "Saving…" : "Save key"}
+        {saving ? "Saving..." : "Save key"}
       </button>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// HamburgerMenu (main export)
-// ---------------------------------------------------------------------------
 export function HamburgerMenu() {
   const [open, setOpen] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const ref = useRef<HTMLDivElement>(null);
 
-  // Restore session on mount
   useEffect(() => {
     apiGet("/api/v1/auth/me")
-      .then((d) => setUser({ id: d.id, email: d.email }))
+      .then((d) => setUser({ id: d.id, email: d.email, role: d.role }))
       .catch(() => setUser(null));
   }, []);
 
-  // Close on outside click
   useEffect(() => {
     function handler(e: MouseEvent) {
       if (ref.current && !ref.current.contains(e.target as Node)) {
@@ -243,7 +236,6 @@ export function HamburgerMenu() {
     return () => document.removeEventListener("mousedown", handler);
   }, []);
 
-  // Close on Escape
   useEffect(() => {
     function handler(e: KeyboardEvent) {
       if (e.key === "Escape") setOpen(false);
@@ -277,6 +269,19 @@ export function HamburgerMenu() {
             aria-label="Account panel"
           >
             <LoginCard user={user} onAuth={(u) => { setUser(u); }} />
+            {user && (
+              <div className="hm-card" style={{ gap: "4px", padding: "8px" }}>
+                <p className="hm-label" style={{ padding: "4px 6px 2px" }}>Navigate</p>
+                <a href="/" className="hm-nav-link">
+                  <span className="hm-nav-icon">M</span>
+                  Markets
+                </a>
+                <a href="/profile" className="hm-nav-link">
+                  <span className="hm-nav-icon">P</span>
+                  Portfolio
+                </a>
+              </div>
+            )}
             <ApiKeyCard user={user} />
           </div>
         )}
@@ -285,18 +290,13 @@ export function HamburgerMenu() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Styles — dark-themed to match the app's #0b1020 background
-// ---------------------------------------------------------------------------
 const STYLES = `
-  /* ---- Root ---- */
   .hm-root {
     position: relative;
     display: inline-block;
     color: #f5f7fb;
   }
 
-  /* ---- Trigger button ---- */
   .hm-trigger {
     position: relative;
     display: flex;
@@ -321,7 +321,6 @@ const STYLES = `
     outline-offset: 2px;
   }
 
-  /* Three bars */
   .hm-bar {
     display: block;
     height: 2px;
@@ -334,7 +333,6 @@ const STYLES = `
   .hm-trigger-open .hm-bar:nth-child(2) { opacity: 0; transform: scaleX(0); }
   .hm-trigger-open .hm-bar:nth-child(3) { transform: translateY(-7px) rotate(-45deg); }
 
-  /* Signed-in dot */
   .hm-badge {
     position: absolute;
     top: 5px;
@@ -346,7 +344,6 @@ const STYLES = `
     border: 1.5px solid #0b1020;
   }
 
-  /* ---- Dropdown panel ---- */
   .hm-panel {
     position: absolute;
     right: 0;
@@ -368,7 +365,6 @@ const STYLES = `
     to   { opacity: 1; transform: translateY(0) scale(1); }
   }
 
-  /* ---- Card ---- */
   .hm-card {
     display: flex;
     flex-direction: column;
@@ -380,7 +376,6 @@ const STYLES = `
   }
   .hm-card-muted { opacity: 0.55; }
 
-  /* ---- Tab row (login / register switcher) ---- */
   .hm-tab-row {
     display: flex;
     gap: 4px;
@@ -405,7 +400,6 @@ const STYLES = `
     color: #f5f7fb;
   }
 
-  /* ---- Typography ---- */
   .hm-label {
     font-size: 10px;
     font-weight: 600;
@@ -429,7 +423,6 @@ const STYLES = `
     margin: 0;
   }
 
-  /* ---- Status row ---- */
   .hm-status-row {
     display: flex;
     align-items: center;
@@ -442,9 +435,8 @@ const STYLES = `
     flex-shrink: 0;
   }
   .hm-dot-green { background: #4ade80; }
-  .hm-dot-dim   { background: #374151; }
+  .hm-dot-dim { background: #374151; }
 
-  /* ---- Input ---- */
   .hm-input {
     width: 100%;
     box-sizing: border-box;
@@ -463,7 +455,6 @@ const STYLES = `
   }
   .hm-input::placeholder { color: #4b5563; }
 
-  /* ---- Buttons ---- */
   .hm-btn {
     width: 100%;
     padding: 8px 12px;
@@ -489,7 +480,34 @@ const STYLES = `
   }
   .hm-btn-ghost:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
 
-  /* ---- Feedback ---- */
-  .hm-error   { font-size: 12px; color: #f87171; margin: 0; }
+  .hm-error { font-size: 12px; color: #f87171; margin: 0; }
   .hm-success { font-size: 12px; color: #4ade80; margin: 0; }
+
+  .hm-nav-link {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 6px;
+    border-radius: 7px;
+    color: #d1d5db;
+    font-size: 13px;
+    text-decoration: none;
+    transition: background 0.15s, color 0.15s;
+  }
+  .hm-nav-link:hover {
+    background: rgba(255,255,255,0.07);
+    color: #ffffff;
+  }
+  .hm-nav-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+    background: rgba(255,255,255,0.08);
+    color: #9ca3af;
+    font-size: 10px;
+    font-weight: 700;
+  }
 `;

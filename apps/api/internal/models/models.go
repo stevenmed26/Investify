@@ -55,6 +55,7 @@ type PredictionRequest struct {
 
 type PredictionResponse struct {
 	Symbol             string         `json:"symbol"`
+	HorizonDays        int            `json:"horizon_days,omitempty"`
 	PredictedDirection string         `json:"predicted_direction"`
 	PredictedReturnPct float64        `json:"predicted_return_pct"`
 	ConfidenceScore    float64        `json:"confidence_score"`

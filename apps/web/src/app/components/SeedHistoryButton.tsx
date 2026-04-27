@@ -19,7 +19,7 @@ export default function SeedHistoryButton({ symbol }: Props) {
 
     try {
       const res = await fetch(
-        `${API_BASE_URL}/api/v1/admin/ingest/${symbol}/history?days=240`,
+        `${API_BASE_URL}/api/v1/admin/ingest/${symbol}/history?days=365`,
         {
           method: "POST",
           credentials: "include",
@@ -29,7 +29,11 @@ export default function SeedHistoryButton({ symbol }: Props) {
       const data = await res.json().catch(() => null);
 
       if (!res.ok) {
-        setStatus(data?.error ?? data?.detail ?? "Unauthorized");
+        if (res.status === 403) {
+          setStatus("Admin access is required to refresh shared history data.");
+        } else {
+          setStatus(data?.error ?? data?.detail ?? "Unauthorized");
+        }
         return;
       }
 

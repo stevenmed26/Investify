@@ -3,14 +3,17 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
 	"time"
 
+	"investify/apps/api/internal/jobs"
 	"investify/apps/api/internal/middleware"
 	"investify/apps/api/internal/services"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -18,6 +21,7 @@ type AdminHandler struct {
 	DB                *pgxpool.Pool
 	CredentialService *services.CredentialService
 	PriceIngestionSV  *services.PriceIngestionService
+	JobManager        *jobs.Manager
 }
 
 type setTwelveDataKeyRequest struct {
@@ -51,9 +55,7 @@ func (h AdminHandler) SetTwelveDataAPIKey(w http.ResponseWriter, r *http.Request
 
 	if err := h.CredentialService.UpsertAPIKey(ctx, user.UserID, "twelvedata", req.APIKey); err != nil {
 		log.Printf("[admin] failed storing Twelve Data API key user_id=%s err=%v", user.UserID, err)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{
-			"error": "failed to store api key",
-		})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to store api key"})
 		return
 	}
 
@@ -94,21 +96,13 @@ func (h AdminHandler) BatchIngestHistory(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Minute)
-	defer cancel()
-
-	delayMS := 8000
+	delayMS := 9000
 	if raw := r.URL.Query().Get("delay_ms"); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed >= 0 {
 			delayMS = parsed
 		}
 	}
 
-	// FIX: Default raised from 180 to 365 days. SMA-50 requires 50 prior trading
-	// days before it produces a value, and momentum/volatility indicators need
-	// additional warmup. With 180 calendar days (~129 trading days) only ~79 rows
-	// have valid SMA-50 values. 365 days (~260 trading days) gives ~210 fully
-	// populated rows per ticker — enough for all indicators to be meaningful.
 	days := 365
 	if raw := r.URL.Query().Get("days"); raw != "" {
 		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 5000 {
@@ -119,31 +113,91 @@ func (h AdminHandler) BatchIngestHistory(w http.ResponseWriter, r *http.Request)
 	var req batchIngestRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
-	symbols := req.Symbols
-	if len(symbols) == 0 {
-		rows, err := h.DB.Query(ctx, `
-			SELECT symbol
-			FROM tickers
-			WHERE is_active = TRUE
-			ORDER BY symbol ASC
-		`)
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch active tickers"})
-			return
-		}
-		defer rows.Close()
-
-		for rows.Next() {
-			var symbol string
-			if err := rows.Scan(&symbol); err != nil {
-				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to scan active ticker"})
-				return
-			}
-			symbols = append(symbols, symbol)
-		}
+	symbols, err := h.resolveSymbols(context.Background(), req.Symbols)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
 	}
 
-	log.Printf("[batch-ingest] start user_id=%s symbols=%d days=%d delay_ms=%d", user.UserID, len(symbols), days, delayMS)
+	job := h.JobManager.Create("batch_ingest_history", "Queued historical ingest job.")
+	go h.runBatchIngestJob(job.ID, user.UserID, symbols, days, delayMS)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job_id":       job.ID,
+		"status":       job.Status,
+		"days":         days,
+		"delay_ms":     delayMS,
+		"symbol_count": len(symbols),
+	})
+}
+
+func (h AdminHandler) BatchBackfillFeatures(w http.ResponseWriter, r *http.Request) {
+	user, ok := middleware.GetAuthUser(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	symbols, err := h.resolveSymbols(context.Background(), nil)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	job := h.JobManager.Create("batch_backfill_features", "Queued feature backfill job.")
+	go h.runBatchBackfillJob(job.ID, user.UserID, symbols)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job_id":       job.ID,
+		"status":       job.Status,
+		"symbol_count": len(symbols),
+	})
+}
+
+func (h AdminHandler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
+	jobID := chi.URLParam(r, "jobID")
+	job, ok := h.JobManager.Get(jobID)
+	if !ok {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "job not found"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, job)
+}
+
+func (h AdminHandler) resolveSymbols(ctx context.Context, requested []string) ([]string, error) {
+	if len(requested) > 0 {
+		return requested, nil
+	}
+
+	rows, err := h.DB.Query(ctx, `
+		SELECT symbol
+		FROM tickers
+		WHERE is_active = TRUE
+		ORDER BY symbol ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch active tickers")
+	}
+	defer rows.Close()
+
+	symbols := make([]string, 0)
+	for rows.Next() {
+		var symbol string
+		if err := rows.Scan(&symbol); err != nil {
+			return nil, fmt.Errorf("failed to scan active ticker")
+		}
+		symbols = append(symbols, symbol)
+	}
+
+	return symbols, nil
+}
+
+func (h AdminHandler) runBatchIngestJob(jobID, userID string, symbols []string, days, delayMS int) {
+	h.JobManager.MarkRunning(jobID, "Historical ingest job is running.")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
 
 	type itemResult struct {
 		Symbol        string `json:"symbol"`
@@ -154,11 +208,11 @@ func (h AdminHandler) BatchIngestHistory(w http.ResponseWriter, r *http.Request)
 	results := make([]itemResult, 0, len(symbols))
 
 	for i, symbol := range symbols {
-		log.Printf("[batch-ingest] processing user_id=%s index=%d/%d symbol=%s", user.UserID, i+1, len(symbols), symbol)
+		h.JobManager.UpdateMessage(jobID, "Processing "+symbol+" ("+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(symbols))+").")
 
-		rowsProcessed, err := h.PriceIngestionSV.IngestBySymbolForUser(ctx, user.UserID, symbol, days)
+		rowsProcessed, err := h.PriceIngestionSV.IngestBySymbolForUser(ctx, userID, symbol, days)
 		if err != nil {
-			log.Printf("[batch-ingest] failed user_id=%s symbol=%s err=%v", user.UserID, symbol, err)
+			log.Printf("[batch-ingest] failed user_id=%s symbol=%s err=%v", userID, symbol, err)
 			results = append(results, itemResult{Symbol: symbol, Error: err.Error()})
 		} else {
 			results = append(results, itemResult{Symbol: symbol, RowsProcessed: rowsProcessed})
@@ -167,63 +221,25 @@ func (h AdminHandler) BatchIngestHistory(w http.ResponseWriter, r *http.Request)
 		if i < len(symbols)-1 && delayMS > 0 {
 			select {
 			case <-ctx.Done():
-				writeJSON(w, http.StatusGatewayTimeout, map[string]any{
-					"error":   "batch ingest timed out",
-					"results": results,
-				})
+				h.JobManager.MarkFailed(jobID, "Historical ingest job timed out.", "batch ingest timed out")
 				return
 			case <-time.After(time.Duration(delayMS) * time.Millisecond):
 			}
 		}
 	}
 
-	log.Printf("[batch-ingest] completed user_id=%s symbols=%d", user.UserID, len(symbols))
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":   "ok",
+	h.JobManager.MarkCompleted(jobID, "Historical ingest job completed.", map[string]any{
 		"days":     days,
 		"delay_ms": delayMS,
 		"results":  results,
 	})
 }
 
-// BatchBackfillFeatures backfills technical features for all active tickers
-// in a single request. Previously users had to navigate to each ticker page
-// and click "Generate Features" individually — meaning training almost always
-// ran with only one ticker's data in technical_features.
-func (h AdminHandler) BatchBackfillFeatures(w http.ResponseWriter, r *http.Request) {
-	user, ok := middleware.GetAuthUser(r.Context())
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
+func (h AdminHandler) runBatchBackfillJob(jobID, userID string, symbols []string) {
+	h.JobManager.MarkRunning(jobID, "Feature backfill job is running.")
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-
-	rows, err := h.DB.Query(ctx, `
-		SELECT symbol
-		FROM tickers
-		WHERE is_active = TRUE
-		ORDER BY symbol ASC
-	`)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch active tickers"})
-		return
-	}
-	defer rows.Close()
-
-	var symbols []string
-	for rows.Next() {
-		var symbol string
-		if err := rows.Scan(&symbol); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to scan ticker"})
-			return
-		}
-		symbols = append(symbols, symbol)
-	}
-
-	log.Printf("[batch-backfill] start user_id=%s symbols=%d", user.UserID, len(symbols))
 
 	type itemResult struct {
 		Symbol        string `json:"symbol"`
@@ -236,22 +252,18 @@ func (h AdminHandler) BatchBackfillFeatures(w http.ResponseWriter, r *http.Reque
 	featureSV := services.FeatureEngineeringService{DB: h.DB}
 
 	for i, symbol := range symbols {
-		log.Printf("[batch-backfill] processing index=%d/%d symbol=%s", i+1, len(symbols), symbol)
+		h.JobManager.UpdateMessage(jobID, "Generating features for "+symbol+" ("+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(symbols))+").")
 
 		count, err := featureSV.BackfillBySymbol(ctx, symbol)
 		if err != nil {
-			log.Printf("[batch-backfill] failed symbol=%s err=%v", symbol, err)
+			log.Printf("[batch-backfill] failed user_id=%s symbol=%s err=%v", userID, symbol, err)
 			results = append(results, itemResult{Symbol: symbol, Error: err.Error()})
 		} else {
-			log.Printf("[batch-backfill] done symbol=%s rows=%d", symbol, count)
 			results = append(results, itemResult{Symbol: symbol, RowsProcessed: count})
 		}
 	}
 
-	log.Printf("[batch-backfill] completed user_id=%s symbols=%d", user.UserID, len(symbols))
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"status":  "ok",
+	h.JobManager.MarkCompleted(jobID, "Feature backfill job completed.", map[string]any{
 		"results": results,
 	})
 }

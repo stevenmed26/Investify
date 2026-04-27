@@ -1,21 +1,19 @@
 "use client";
 
 import {
+  Area,
+  CartesianGrid,
   ComposedChart,
   Line,
-  Area,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  TooltipProps,
   XAxis,
   YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-  ReferenceLine,
-  TooltipProps,
 } from "recharts";
+import { addTradingDays, formatTradingDate } from "../../lib/tradingDays";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 type PricePoint = {
   trading_date: string;
   close: number;
@@ -33,19 +31,12 @@ type Props = {
   prediction?: Prediction | null;
 };
 
-// ---------------------------------------------------------------------------
-// Chart data shape
-// ---------------------------------------------------------------------------
 type ChartPoint = {
   date: string;
-  // Historical close — null for projected points
   close: number | null;
-  // Projected central line — null for historical points
   projected: number | null;
-  // Confidence band bounds — null for historical points
   bandLow: number | null;
   bandHigh: number | null;
-  // Flag so the tooltip can distinguish past vs future
   isFuture?: boolean;
 };
 
@@ -53,32 +44,11 @@ type ChartPoint = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Advance a YYYY-MM-DD date by N calendar days, skipping weekends. */
-function addTradingDays(dateStr: string, days: number): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  let added = 0;
-  while (added < days) {
-    d.setUTCDate(d.getUTCDate() + 1);
-    const dow = d.getUTCDay();
-    if (dow !== 0 && dow !== 6) added++;
-  }
-  return d.toISOString().slice(0, 10);
-}
-
-/** Format YYYY-MM-DD as "Mar 20" */
-function fmtDate(dateStr: string): string {
-  const d = new Date(dateStr + "T00:00:00Z");
-  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-}
-
 /** Round to 2 dp */
 function r2(n: number) {
   return Math.round(n * 100) / 100;
 }
 
-// ---------------------------------------------------------------------------
-// Build chart data
-// ---------------------------------------------------------------------------
 function buildChartData(data: PricePoint[], prediction: Prediction | null | undefined): {
   points: ChartPoint[];
   todayDate: string;
@@ -90,7 +60,6 @@ function buildChartData(data: PricePoint[], prediction: Prediction | null | unde
   const lastClose = lastPoint.close;
   const todayDate = lastPoint.trading_date;
 
-  // Historical points
   const points: ChartPoint[] = sorted.map((p) => ({
     date: p.trading_date,
     close: p.close,
@@ -100,7 +69,6 @@ function buildChartData(data: PricePoint[], prediction: Prediction | null | unde
     isFuture: false,
   }));
 
-  // Anchor the projection at today's close so the lines connect
   points[points.length - 1] = {
     ...points[points.length - 1],
     projected: lastClose,
@@ -115,19 +83,13 @@ function buildChartData(data: PricePoint[], prediction: Prediction | null | unde
   const targetPrice = lastClose * (1 + targetReturn);
   const confidence = Math.max(0.05, Math.min(0.99, prediction.confidence_score));
 
-  // Band half-width at the horizon: lower confidence → wider band.
-  // We use a simple model: uncertainty = (1 - confidence) * |predicted move|,
-  // with a floor of 0.5% so there's always a visible band even at high confidence.
   const moveMagnitude = Math.abs(targetReturn);
   const uncertaintyFraction = (1 - confidence) * Math.max(moveMagnitude, 0.005);
   const bandHalfAtHorizon = lastClose * uncertaintyFraction;
 
-  // Generate one point per trading day in the horizon
   for (let i = 1; i <= horizonDays; i++) {
     const frac = i / horizonDays;
     const projectedPrice = r2(lastClose + (targetPrice - lastClose) * frac);
-
-    // Band widens linearly from 0 at today to full width at horizon
     const bandHalf = r2(bandHalfAtHorizon * frac);
 
     const date = addTradingDays(todayDate, i);
@@ -144,18 +106,12 @@ function buildChartData(data: PricePoint[], prediction: Prediction | null | unde
   return { points, todayDate };
 }
 
-// ---------------------------------------------------------------------------
-// Colour helpers
-// ---------------------------------------------------------------------------
 function projectionColor(direction: string | undefined): string {
-  if (direction === "bullish") return "#4ade80"; // green
-  if (direction === "bearish") return "#f87171"; // red
-  return "#94a3b8"; // slate/neutral
+  if (direction === "bullish") return "#4ade80";
+  if (direction === "bearish") return "#f87171";
+  return "#94a3b8";
 }
 
-// ---------------------------------------------------------------------------
-// Custom tooltip
-// ---------------------------------------------------------------------------
 function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
   if (!active || !payload || payload.length === 0) return null;
 
@@ -163,15 +119,21 @@ function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
 
   return (
     <div className="rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-xs shadow-lg">
-      <p className="mb-1 font-semibold text-white">{fmtDate(point.date)}</p>
+      <p className="mb-1 font-semibold text-white">{formatTradingDate(point.date)}</p>
       {point.close != null && (
-        <p className="text-slate-300">Close: <span className="text-white font-medium">${point.close.toFixed(2)}</span></p>
+        <p className="text-slate-300">
+          Close: <span className="font-medium text-white">${point.close.toFixed(2)}</span>
+        </p>
       )}
       {point.projected != null && point.isFuture && (
         <>
-          <p className="text-slate-400 mt-0.5">Projected: <span className="text-white font-medium">${point.projected.toFixed(2)}</span></p>
+          <p className="mt-0.5 text-slate-400">
+            Projected: <span className="font-medium text-white">${point.projected.toFixed(2)}</span>
+          </p>
           {point.bandLow != null && point.bandHigh != null && (
-            <p className="text-slate-500 mt-0.5">Range: ${point.bandLow.toFixed(2)} – ${point.bandHigh.toFixed(2)}</p>
+            <p className="mt-0.5 text-slate-500">
+              Range: ${point.bandLow.toFixed(2)} - ${point.bandHigh.toFixed(2)}
+            </p>
           )}
         </>
       )}
@@ -179,9 +141,6 @@ function CustomTooltip({ active, payload }: TooltipProps<number, string>) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Chart
-// ---------------------------------------------------------------------------
 export default function PriceChart({ data, prediction }: Props) {
   const { points, todayDate } = buildChartData(data, prediction);
 
@@ -197,7 +156,6 @@ export default function PriceChart({ data, prediction }: Props) {
   const lineColor = projectionColor(direction);
   const bandColor = lineColor;
 
-  // Y-axis domain: cover both historical and projected+band range
   const allValues = points.flatMap((p) =>
     [p.close, p.bandLow, p.bandHigh, p.projected].filter((v): v is number => v != null)
   );
@@ -205,8 +163,6 @@ export default function PriceChart({ data, prediction }: Props) {
   const maxVal = Math.max(...allValues);
   const padding = (maxVal - minVal) * 0.08;
   const yDomain: [number, number] = [r2(minVal - padding), r2(maxVal + padding)];
-
-  // Only show a tick every ~20 points so the x-axis doesn't crowd
   const tickInterval = Math.max(1, Math.floor(points.length / 8));
 
   return (
@@ -222,7 +178,7 @@ export default function PriceChart({ data, prediction }: Props) {
             axisLine={false}
             minTickGap={32}
             interval={tickInterval}
-            tickFormatter={fmtDate}
+            tickFormatter={formatTradingDate}
           />
 
           <YAxis
@@ -236,7 +192,6 @@ export default function PriceChart({ data, prediction }: Props) {
 
           <Tooltip content={<CustomTooltip />} />
 
-          {/* Today marker */}
           {todayDate && (
             <ReferenceLine
               x={todayDate}
@@ -252,7 +207,6 @@ export default function PriceChart({ data, prediction }: Props) {
             />
           )}
 
-          {/* Confidence band (rendered first so lines sit on top) */}
           <Area
             type="monotone"
             dataKey="bandHigh"
@@ -267,14 +221,13 @@ export default function PriceChart({ data, prediction }: Props) {
             type="monotone"
             dataKey="bandLow"
             stroke="none"
-            fill="#0b1020" // matches page background — clips the band from below
+            fill="#0b1020"
             fillOpacity={1}
             isAnimationActive={false}
             legendType="none"
             connectNulls={false}
           />
 
-          {/* Historical price line */}
           <Line
             type="monotone"
             dataKey="close"
@@ -285,7 +238,6 @@ export default function PriceChart({ data, prediction }: Props) {
             connectNulls={false}
           />
 
-          {/* Projected central line */}
           <Line
             type="monotone"
             dataKey="projected"
@@ -299,7 +251,6 @@ export default function PriceChart({ data, prediction }: Props) {
         </ComposedChart>
       </ResponsiveContainer>
 
-      {/* Legend */}
       {prediction && (
         <div className="mt-2 flex items-center gap-4 px-1 text-xs text-slate-400">
           <span className="flex items-center gap-1.5">

@@ -10,7 +10,19 @@ type TrainResult = {
   labels: string[];
   tickers: string[];
   model_path: string;
+  horizon_days: number;
 };
+
+type TrainJob = {
+  status: "queued" | "running" | "completed" | "failed";
+  message?: string;
+  error?: string;
+  result?: TrainResult;
+};
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export default function TrainModelButton() {
   const [status, setStatus] = useState<string | null>(null);
@@ -21,40 +33,70 @@ export default function TrainModelButton() {
     setStatus(null);
 
     try {
-      // Always train on ALL tickers — the symbol param has been removed.
-      // A model trained on one ticker has ~100 rows and no generalizable signal.
-      // The shared model learns technical patterns across all stocks and is then
-      // applied per-symbol at prediction time.
-      const res = await fetch(`/api/train?horizon_days=5`, {
+      const startRes = await fetch(`/api/train?horizon_days=5`, {
         method: "POST",
         credentials: "include",
       });
 
-      let data: TrainResult | { detail?: string; error?: string } | null = null;
-      try {
-        data = await res.json();
-      } catch {
-        data = null;
-      }
+      const startData = await startRes.json().catch(() => null);
 
-      if (!res.ok) {
-        const err = data as { detail?: string; error?: string } | null;
-        if (res.status === 401) {
+      if (!startRes.ok) {
+        if (startRes.status === 401) {
           setStatus("Sign in first to train the model.");
+        } else if (startRes.status === 403) {
+          setStatus("Admin access is required to train the shared model.");
         } else {
-          setStatus(err?.detail ?? err?.error ?? `Training failed (${res.status})`);
+          setStatus(startData?.detail ?? startData?.error ?? `Training failed (${startRes.status})`);
         }
         return;
       }
 
-      const result = data as TrainResult;
-      const tickerList = result.tickers?.join(", ") ?? "all tickers";
-      setStatus(
-        `Model trained on ${tickerList} — ` +
-        `${result.rows} rows, ` +
-        `${(result.accuracy * 100).toFixed(1)}% accuracy on ${result.test_rows} test rows. ` +
-        `Refresh to see updated predictions.`
-      );
+      const jobId = startData?.job_id as string | undefined;
+      if (!jobId) {
+        setStatus("Training job could not be started.");
+        return;
+      }
+
+      setStatus("Training job queued...");
+
+      while (true) {
+        await sleep(1500);
+
+        const pollRes = await fetch(`/api/train?job_id=${jobId}`, {
+          cache: "no-store",
+          credentials: "include",
+        });
+        const job = (await pollRes.json().catch(() => null)) as TrainJob | null;
+
+        if (!pollRes.ok || !job) {
+          setStatus("Could not load training status.");
+          return;
+        }
+
+        if (job.status === "queued" || job.status === "running") {
+          setStatus(job.message ?? "Training model...");
+          continue;
+        }
+
+        if (job.status === "failed") {
+          setStatus(job.error ?? "Training failed.");
+          return;
+        }
+
+        const result = job.result;
+        if (!result) {
+          setStatus("Training completed, but no result was returned.");
+          return;
+        }
+
+        const tickerList = result.tickers?.join(", ") ?? "all tickers";
+        setStatus(
+          `Model trained for ${result.horizon_days}-day horizon on ${tickerList} - ` +
+          `${result.rows} rows, ${(result.accuracy * 100).toFixed(1)}% accuracy on ${result.test_rows} test rows. ` +
+          `Refresh to see updated predictions.`
+        );
+        return;
+      }
     } catch (err) {
       console.error(err);
       setStatus("Training request failed.");

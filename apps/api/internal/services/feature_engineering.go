@@ -17,19 +17,21 @@ type FeatureEngineeringService struct {
 type pricePoint struct {
 	TradingDate string
 	Close       float64
+	Volume      int64
 }
 
 type computedFeatureRow struct {
-	TradingDate   string
-	SMA20         *float64
-	SMA50         *float64
-	EMA12         *float64
-	EMA26         *float64
-	RSI14         *float64
-	MACD          *float64
-	Momentum5D    *float64
-	Momentum20D   *float64
-	Volatility20D *float64
+	TradingDate    string
+	SMA20          *float64
+	SMA50          *float64
+	EMA12          *float64
+	EMA26          *float64
+	RSI14          *float64
+	MACD           *float64
+	Momentum5D     *float64
+	Momentum20D    *float64
+	Volatility20D  *float64
+	VolumeRatio20D *float64
 }
 
 func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol string) (int, error) {
@@ -49,7 +51,7 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 	}
 
 	rows, err := s.DB.Query(ctx, `
-		SELECT trading_date::text, COALESCE(adjusted_close, close) AS close_price
+		SELECT trading_date::text, COALESCE(adjusted_close, close) AS close_price, volume
 		FROM historical_prices
 		WHERE ticker_id = $1
 		ORDER BY trading_date ASC
@@ -62,7 +64,7 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 	prices := make([]pricePoint, 0)
 	for rows.Next() {
 		var p pricePoint
-		if err := rows.Scan(&p.TradingDate, &p.Close); err != nil {
+		if err := rows.Scan(&p.TradingDate, &p.Close, &p.Volume); err != nil {
 			return 0, fmt.Errorf("scan price row: %w", err)
 		}
 		prices = append(prices, p)
@@ -95,9 +97,10 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 				momentum_5d,
 				momentum_20d,
 				volatility_20d,
+				volume_ratio_20d,
 				created_at
 			)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 			ON CONFLICT (ticker_id, trading_date)
 			DO UPDATE SET
 				sma_20 = EXCLUDED.sma_20,
@@ -108,7 +111,8 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 				macd = EXCLUDED.macd,
 				momentum_5d = EXCLUDED.momentum_5d,
 				momentum_20d = EXCLUDED.momentum_20d,
-				volatility_20d = EXCLUDED.volatility_20d
+				volatility_20d = EXCLUDED.volatility_20d,
+				volume_ratio_20d = EXCLUDED.volume_ratio_20d
 		`,
 			tickerID,
 			f.TradingDate,
@@ -121,6 +125,7 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 			f.Momentum5D,
 			f.Momentum20D,
 			f.Volatility20D,
+			f.VolumeRatio20D,
 			time.Now().UTC(),
 		)
 		if err != nil {
@@ -139,8 +144,10 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 func computeFeatureRows(prices []pricePoint) []computedFeatureRow {
 	n := len(prices)
 	closes := make([]float64, n)
+	volumes := make([]float64, n)
 	for i, p := range prices {
 		closes[i] = p.Close
+		volumes[i] = float64(p.Volume)
 	}
 
 	sma20 := simpleMovingAverageSeries(closes, 20)
@@ -151,6 +158,7 @@ func computeFeatureRows(prices []pricePoint) []computedFeatureRow {
 	momentum5 := momentumSeries(closes, 5)
 	momentum20 := momentumSeries(closes, 20)
 	vol20 := volatilitySeries(closes, 20)
+	volRatio20 := volumeRatioSeries(volumes, 20)
 
 	out := make([]computedFeatureRow, 0, n)
 	for i, p := range prices {
@@ -161,16 +169,17 @@ func computeFeatureRows(prices []pricePoint) []computedFeatureRow {
 		}
 
 		out = append(out, computedFeatureRow{
-			TradingDate:   p.TradingDate,
-			SMA20:         sma20[i],
-			SMA50:         sma50[i],
-			EMA12:         ema12[i],
-			EMA26:         ema26[i],
-			RSI14:         rsi14[i],
-			MACD:          macd,
-			Momentum5D:    momentum5[i],
-			Momentum20D:   momentum20[i],
-			Volatility20D: vol20[i],
+			TradingDate:    p.TradingDate,
+			SMA20:          sma20[i],
+			SMA50:          sma50[i],
+			EMA12:          ema12[i],
+			EMA26:          ema26[i],
+			RSI14:          rsi14[i],
+			MACD:           macd,
+			Momentum5D:     momentum5[i],
+			Momentum20D:    momentum20[i],
+			Volatility20D:  vol20[i],
+			VolumeRatio20D: volRatio20[i],
 		})
 	}
 
@@ -348,6 +357,39 @@ func sampleStdDev(values []float64) float64 {
 	variance /= float64(n - 1)
 
 	return math.Sqrt(variance)
+}
+
+// volumeRatioSeries computes today's volume divided by the rolling N-day average
+// volume. Values > 1.0 indicate above-average activity (often precede breakouts);
+// values < 1.0 indicate quiet trading. Zero-volume days are skipped to avoid
+// division by zero from halts or data gaps.
+func volumeRatioSeries(volumes []float64, window int) []*float64 {
+	out := make([]*float64, len(volumes))
+	if window <= 0 {
+		return out
+	}
+
+	for i := range volumes {
+		if i < window-1 {
+			continue
+		}
+		segment := volumes[i-window+1 : i+1]
+		sum := 0.0
+		count := 0
+		for _, v := range segment {
+			if v > 0 {
+				sum += v
+				count++
+			}
+		}
+		if count == 0 || volumes[i] == 0 {
+			continue
+		}
+		avg := sum / float64(count)
+		ratio := round4(volumes[i] / avg)
+		out[i] = &ratio
+	}
+	return out
 }
 
 func round4(v float64) float64 {

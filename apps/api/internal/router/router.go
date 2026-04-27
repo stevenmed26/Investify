@@ -4,11 +4,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
+	"time"
 
 	"investify/apps/api/internal/auth"
 	"investify/apps/api/internal/clients/mlclient"
 	"investify/apps/api/internal/config"
 	"investify/apps/api/internal/handlers"
+	"investify/apps/api/internal/jobs"
 	"investify/apps/api/internal/marketdata"
 	authmw "investify/apps/api/internal/middleware"
 	"investify/apps/api/internal/security"
@@ -22,8 +25,22 @@ import (
 func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 	r := chi.NewRouter()
 
+	// CORS: read allowed origins from env so production deployments work.
+	// ALLOWED_ORIGINS is a comma-separated list, e.g.:
+	//   http://localhost:3000,https://investify.example.com
+	corsOrigins := os.Getenv("ALLOWED_ORIGINS")
+	if corsOrigins == "" {
+		corsOrigins = "http://localhost:3000"
+		log.Printf("[cors] ALLOWED_ORIGINS not set — defaulting to http://localhost:3000 (dev only)")
+	}
+	allowedOrigins := strings.Split(corsOrigins, ",")
+	for i, o := range allowedOrigins {
+		allowedOrigins[i] = strings.TrimSpace(o)
+	}
+	log.Printf("[cors] allowed origins: %v", allowedOrigins)
+
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"http://localhost:3000"},
+		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: true,
@@ -35,12 +52,11 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		DB:        db,
 		Encryptor: encryptor,
 	}
-
-	ml := mlclient.New(cfg.MLBaseURL)
+	ml := mlclient.New(cfg.MLBaseURL, cfg.MLInternalToken)
+	jobManager := jobs.NewManager()
 
 	providerName := os.Getenv("MARKET_DATA_PROVIDER")
 	twelveDataBaseURL := os.Getenv("TWELVE_DATA_BASE_URL")
-
 	var provider marketdata.Provider
 	if providerName == "twelvedata" {
 		log.Printf("[marketdata] provider=twelvedata")
@@ -57,46 +73,32 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		CredentialService: credentialService,
 		ProviderName:      providerName,
 	}
+	featureService := &services.FeatureEngineeringService{DB: db}
 
-	featureService := &services.FeatureEngineeringService{
-		DB: db,
-	}
-
-	authHandler := handlers.AuthHandler{
-		DB:         db,
-		JWTManager: jwtManager,
-	}
-
-	tickerHandler := handlers.TickerHandler{
-		DB:       db,
-		MLClient: ml,
-	}
-
-	holdingHandler := handlers.HoldingHandler{
-		DB: db,
-	}
-
-	priceHandler := handlers.PriceHandler{
-		DB:               db,
-		PriceIngestionSV: priceIngestionService,
-	}
-
+	authHandler := handlers.AuthHandler{DB: db, JWTManager: jwtManager}
+	tickerHandler := handlers.TickerHandler{DB: db, MLClient: ml}
+	holdingHandler := handlers.HoldingHandler{DB: db}
+	priceHandler := handlers.PriceHandler{DB: db, PriceIngestionSV: priceIngestionService}
+	featureHandler := handlers.FeatureHandler{DB: db, FeatureSV: featureService}
 	adminHandler := handlers.AdminHandler{
 		DB:                db,
 		CredentialService: credentialService,
 		PriceIngestionSV:  priceIngestionService,
-	}
-
-	featureHandler := handlers.FeatureHandler{
-		DB:        db,
-		FeatureSV: featureService,
+		JobManager:        jobManager,
 	}
 
 	requireAuth := authmw.RequireAuth(jwtManager)
+	requireAdmin := authmw.RequireAdmin
+
+	// Rate limit auth endpoints: 10 attempts per minute per IP.
+	// This protects against brute-force and credential stuffing.
+	authLimiter := authmw.NewRateLimiter(10, 1*time.Minute)
 
 	r.Get("/health", handlers.Health)
 
+	// Auth
 	r.Route("/api/v1/auth", func(r chi.Router) {
+		r.Use(authLimiter.Limit)
 		r.Post("/register", authHandler.Register)
 		r.Post("/login", authHandler.Login)
 		r.Post("/logout", authHandler.Logout)
@@ -104,35 +106,40 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 	})
 
 	r.Route("/api/v1", func(r chi.Router) {
-		// Public read endpoints
+		// Public read
 		r.Get("/tickers", tickerHandler.ListTickers)
 		r.Get("/tickers/{symbol}", tickerHandler.GetTickerBySymbol)
 		r.Get("/tickers/{symbol}/prediction", tickerHandler.GetPredictionBySymbol)
 		r.Get("/tickers/{symbol}/history", priceHandler.GetHistoricalPricesBySymbol)
 		r.Get("/tickers/{symbol}/features", featureHandler.GetFeaturesBySymbol)
 
+		// Authenticated
 		r.Group(func(r chi.Router) {
 			r.Use(requireAuth)
 
-			// Holdings
+			// Holdings (full CRUD)
 			r.Get("/holdings", holdingHandler.ListHoldings)
 			r.Post("/holdings", holdingHandler.CreateHolding)
 			r.Post("/holdings/by-symbol", holdingHandler.CreateHoldingBySymbol)
+			r.Delete("/holdings/{id}", holdingHandler.DeleteHolding)
 
-			// Provider / credentials
+			// Provider / API key
 			r.Get("/admin/provider-status", adminHandler.GetProviderStatus)
 			r.Post("/admin/secrets/twelvedata", adminHandler.SetTwelveDataAPIKey)
 
-			// Ticker management
-			r.Post("/admin/tickers/bulk", tickerHandler.BulkUpsertTickers)
+			r.Group(func(r chi.Router) {
+				r.Use(requireAdmin)
 
-			// Price ingestion
-			r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
-			r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
+				// Ticker management (bulk add from UI/registry)
+				r.Post("/admin/tickers/bulk", tickerHandler.BulkUpsertTickers)
 
-			// Feature engineering
-			r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
-			r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
+				// Manual ingest/backfill kept for admin use but no longer surfaced in UI
+				r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
+				r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
+				r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
+				r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
+				r.Get("/admin/jobs/{jobID}", adminHandler.GetJobStatus)
+			})
 		})
 	})
 
