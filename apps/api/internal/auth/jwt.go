@@ -12,6 +12,7 @@ const CookieName = "investify_token"
 type Claims struct {
 	UserID string `json:"user_id"`
 	Email  string `json:"email"`
+	Role   string `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -25,10 +26,11 @@ func NewJWTManager(secret string) *JWTManager {
 	}
 }
 
-func (m *JWTManager) Generate(userID, email string) (string, error) {
+func (m *JWTManager) Generate(userID, email, role string) (string, error) {
 	claims := Claims{
 		UserID: userID,
 		Email:  email,
+		Role:   role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(7 * 24 * time.Hour)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),

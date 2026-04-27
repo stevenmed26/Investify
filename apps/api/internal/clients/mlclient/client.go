@@ -14,12 +14,14 @@ import (
 
 type Client struct {
 	BaseURL    string
+	AuthToken  string
 	HTTPClient *http.Client
 }
 
-func New(baseURL string) *Client {
+func New(baseURL, authToken string) *Client {
 	return &Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
+		BaseURL:   strings.TrimRight(baseURL, "/"),
+		AuthToken: authToken,
 		HTTPClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -52,6 +54,9 @@ func (c *Client) Predict(ctx context.Context, symbol string, horizonDays int) (*
 	}
 
 	req.Header.Set("Content-Type", "application/json")
+	if c.AuthToken != "" {
+		req.Header.Set("X-Internal-Token", c.AuthToken)
+	}
 
 	res, err := c.HTTPClient.Do(req)
 	if err != nil {
