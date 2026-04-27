@@ -11,6 +11,7 @@ import (
 	"investify/apps/api/internal/clients/mlclient"
 	"investify/apps/api/internal/config"
 	"investify/apps/api/internal/handlers"
+	"investify/apps/api/internal/jobs"
 	"investify/apps/api/internal/marketdata"
 	authmw "investify/apps/api/internal/middleware"
 	"investify/apps/api/internal/security"
@@ -51,7 +52,8 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		DB:        db,
 		Encryptor: encryptor,
 	}
-	ml := mlclient.New(cfg.MLBaseURL)
+	ml := mlclient.New(cfg.MLBaseURL, cfg.MLInternalToken)
+	jobManager := jobs.NewManager()
 
 	providerName := os.Getenv("MARKET_DATA_PROVIDER")
 	twelveDataBaseURL := os.Getenv("TWELVE_DATA_BASE_URL")
@@ -82,9 +84,11 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		DB:                db,
 		CredentialService: credentialService,
 		PriceIngestionSV:  priceIngestionService,
+		JobManager:        jobManager,
 	}
 
 	requireAuth := authmw.RequireAuth(jwtManager)
+	requireAdmin := authmw.RequireAdmin
 
 	// Rate limit auth endpoints: 10 attempts per minute per IP.
 	// This protects against brute-force and credential stuffing.
@@ -123,14 +127,19 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 			r.Get("/admin/provider-status", adminHandler.GetProviderStatus)
 			r.Post("/admin/secrets/twelvedata", adminHandler.SetTwelveDataAPIKey)
 
-			// Ticker management (bulk add from UI/registry)
-			r.Post("/admin/tickers/bulk", tickerHandler.BulkUpsertTickers)
+			r.Group(func(r chi.Router) {
+				r.Use(requireAdmin)
 
-			// Manual ingest/backfill kept for admin use but no longer surfaced in UI
-			r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
-			r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
-			r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
-			r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
+				// Ticker management (bulk add from UI/registry)
+				r.Post("/admin/tickers/bulk", tickerHandler.BulkUpsertTickers)
+
+				// Manual ingest/backfill kept for admin use but no longer surfaced in UI
+				r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
+				r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
+				r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
+				r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
+				r.Get("/admin/jobs/{jobID}", adminHandler.GetJobStatus)
+			})
 		})
 	})
 

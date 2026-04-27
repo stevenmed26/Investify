@@ -81,12 +81,21 @@ func (s *PriceIngestionService) IngestBySymbol(ctx context.Context, symbol strin
 
 // fetchAndStore is the shared implementation used by both ingest methods.
 func (s *PriceIngestionService) fetchAndStore(ctx context.Context, tickerID, symbol string, days int, apiKey string) (int, error) {
-	prices, err := s.Provider.FetchDailyHistory(ctx, symbol, days, apiKey)
+	fetchDays, err := s.daysToFetch(ctx, tickerID, days)
+	if err != nil {
+		return 0, err
+	}
+	if fetchDays == 0 {
+		log.Printf("[ingest] skip symbol=%s reason=history_current", symbol)
+		return 0, nil
+	}
+
+	prices, err := s.Provider.FetchDailyHistory(ctx, symbol, fetchDays, apiKey)
 	if err != nil {
 		return 0, fmt.Errorf("fetch history: %w", err)
 	}
 
-	log.Printf("[ingest] fetched rows=%d symbol=%s", len(prices), symbol)
+	log.Printf("[ingest] fetched rows=%d symbol=%s requested_days=%d fetch_days=%d", len(prices), symbol, days, fetchDays)
 
 	tx, err := s.DB.Begin(ctx)
 	if err != nil {
@@ -124,4 +133,59 @@ func (s *PriceIngestionService) fetchAndStore(ctx context.Context, tickerID, sym
 
 	log.Printf("[ingest] completed symbol=%s inserted_or_updated=%d", symbol, inserted)
 	return inserted, nil
+}
+
+func (s *PriceIngestionService) daysToFetch(ctx context.Context, tickerID string, requestedDays int) (int, error) {
+	if requestedDays <= 0 {
+		requestedDays = 365
+	}
+
+	var rowCount int
+	var latest time.Time
+	if err := s.DB.QueryRow(ctx, `
+		SELECT COUNT(*), COALESCE(MAX(trading_date), DATE '1970-01-01')
+		FROM historical_prices
+		WHERE ticker_id = $1
+	`, tickerID).Scan(&rowCount, &latest); err != nil {
+		return 0, fmt.Errorf("check existing history: %w", err)
+	}
+
+	if rowCount == 0 {
+		return requestedDays, nil
+	}
+
+	missingTradingDays := countTradingDaysAfter(latest, expectedLatestTradingDate(time.Now().UTC()))
+	if missingTradingDays <= 0 {
+		return 0, nil
+	}
+
+	const overlapDays = 5
+	fetchDays := missingTradingDays + overlapDays
+	if fetchDays > requestedDays {
+		return requestedDays, nil
+	}
+	return fetchDays, nil
+}
+
+func expectedLatestTradingDate(now time.Time) time.Time {
+	date := dateOnly(now)
+	for date.Weekday() == time.Saturday || date.Weekday() == time.Sunday {
+		date = date.AddDate(0, 0, -1)
+	}
+	return date
+}
+
+func countTradingDaysAfter(latest, target time.Time) int {
+	count := 0
+	for d := dateOnly(latest).AddDate(0, 0, 1); !d.After(dateOnly(target)); d = d.AddDate(0, 0, 1) {
+		if d.Weekday() != time.Saturday && d.Weekday() != time.Sunday {
+			count++
+		}
+	}
+	return count
+}
+
+func dateOnly(t time.Time) time.Time {
+	y, m, d := t.Date()
+	return time.Date(y, m, d, 0, 0, 0, 0, time.UTC)
 }

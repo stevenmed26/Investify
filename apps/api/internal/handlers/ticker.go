@@ -98,6 +98,8 @@ func (h TickerHandler) GetPredictionBySymbol(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	prediction.HorizonDays = horizonDays
+
 	writeJSON(w, http.StatusOK, prediction)
 }
 

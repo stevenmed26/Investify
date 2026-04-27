@@ -59,11 +59,44 @@ func (h HoldingHandler) ListHoldings(w http.ResponseWriter, r *http.Request) {
 		holdings = append(holdings, item)
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"holdings": holdings})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"holdings": holdings,
+	})
+}
+
+// CreateHolding is kept for backwards compatibility but always uses the JWT user.
+func (h HoldingHandler) CreateHolding(w http.ResponseWriter, r *http.Request) {
+	user, ok := middleware.GetAuthUser(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	var req models.CreateHoldingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+		return
+	}
+
+	if req.TickerID == "" || req.SharesOwned < 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ticker_id and valid shares_owned required"})
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	id, err := h.upsertHolding(ctx, user.UserID, req.TickerID, req.SharesOwned, req.AverageCostBasis)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save holding"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
 // CreateHoldingBySymbol adds or upserts a holding for the authenticated user.
-// user_id is always taken from the JWT — never trusted from the body.
+// user_id is always taken from the JWT, never trusted from the body.
 func (h HoldingHandler) CreateHoldingBySymbol(w http.ResponseWriter, r *http.Request) {
 	user, ok := middleware.GetAuthUser(r.Context())
 	if !ok {
@@ -93,18 +126,7 @@ func (h HoldingHandler) CreateHoldingBySymbol(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Upsert: if the user already has this ticker, update shares+basis instead of duplicating.
-	var id string
-	err = h.DB.QueryRow(ctx, `
-		INSERT INTO holdings (user_id, ticker_id, shares_owned, average_cost_basis)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (user_id, ticker_id)
-		DO UPDATE SET
-			shares_owned       = EXCLUDED.shares_owned,
-			average_cost_basis = EXCLUDED.average_cost_basis,
-			updated_at         = NOW()
-		RETURNING id
-	`, user.UserID, tickerID, req.SharesOwned, req.AverageCostBasis).Scan(&id)
+	id, err := h.upsertHolding(ctx, user.UserID, tickerID, req.SharesOwned, req.AverageCostBasis)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save holding"})
 		return
@@ -113,47 +135,6 @@ func (h HoldingHandler) CreateHoldingBySymbol(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id": id, "ticker_id": tickerID, "symbol": req.Symbol,
 	})
-}
-
-// CreateHolding is kept for backwards compatibility but now also uses JWT user.
-func (h HoldingHandler) CreateHolding(w http.ResponseWriter, r *http.Request) {
-	user, ok := middleware.GetAuthUser(r.Context())
-	if !ok {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
-		return
-	}
-
-	var req models.CreateHoldingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-		return
-	}
-
-	if req.TickerID == "" || req.SharesOwned < 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ticker_id and valid shares_owned required"})
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-
-	var id string
-	err := h.DB.QueryRow(ctx, `
-		INSERT INTO holdings (user_id, ticker_id, shares_owned, average_cost_basis)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (user_id, ticker_id)
-		DO UPDATE SET
-			shares_owned       = EXCLUDED.shares_owned,
-			average_cost_basis = EXCLUDED.average_cost_basis,
-			updated_at         = NOW()
-		RETURNING id
-	`, user.UserID, req.TickerID, req.SharesOwned, req.AverageCostBasis).Scan(&id)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to save holding"})
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, map[string]any{"id": id})
 }
 
 // DeleteHolding removes a holding owned by the authenticated user.
@@ -188,4 +169,27 @@ func (h HoldingHandler) DeleteHolding(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+}
+
+func (h HoldingHandler) upsertHolding(ctx context.Context, userID, tickerID string, sharesOwned float64, averageCostBasis *float64) (string, error) {
+	var id string
+	err := h.DB.QueryRow(ctx, `
+		INSERT INTO holdings (user_id, ticker_id, shares_owned, average_cost_basis)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (user_id, ticker_id)
+		DO UPDATE SET
+			shares_owned = holdings.shares_owned + EXCLUDED.shares_owned,
+			average_cost_basis = CASE
+				WHEN holdings.average_cost_basis IS NULL THEN EXCLUDED.average_cost_basis
+				WHEN EXCLUDED.average_cost_basis IS NULL THEN holdings.average_cost_basis
+				WHEN holdings.shares_owned + EXCLUDED.shares_owned = 0 THEN NULL
+				ELSE (
+					(holdings.shares_owned * holdings.average_cost_basis) +
+					(EXCLUDED.shares_owned * EXCLUDED.average_cost_basis)
+				) / (holdings.shares_owned + EXCLUDED.shares_owned)
+			END,
+			updated_at = NOW()
+		RETURNING id
+	`, userID, tickerID, sharesOwned, averageCostBasis).Scan(&id)
+	return id, err
 }

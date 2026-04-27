@@ -26,6 +26,12 @@ type authRequest struct {
 	Password string `json:"password"`
 }
 
+type authResponse struct {
+	ID    string `json:"id"`
+	Email string `json:"email"`
+	Role  string `json:"role"`
+}
+
 func isSecureEnv() bool {
 	env := os.Getenv("APP_ENV")
 	return env == "production" || env == "prod"
@@ -54,17 +60,18 @@ func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	var userID string
+	var role string
 	err = h.DB.QueryRow(ctx, `
-		INSERT INTO users (email, password_hash, created_at, updated_at)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id
-	`, req.Email, string(hash), time.Now().UTC(), time.Now().UTC()).Scan(&userID)
+		INSERT INTO users (email, password_hash, role, created_at, updated_at)
+		VALUES ($1, $2, 'member', $3, $4)
+		RETURNING id, role
+	`, req.Email, string(hash), time.Now().UTC(), time.Now().UTC()).Scan(&userID, &role)
 	if err != nil {
 		writeJSON(w, http.StatusConflict, map[string]string{"error": "user already exists or registration failed"})
 		return
 	}
 
-	token, err := h.JWTManager.Generate(userID, req.Email)
+	token, err := h.JWTManager.Generate(userID, req.Email, role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate session"})
 		return
@@ -82,10 +89,7 @@ func (h AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[auth] register success email=%s user_id=%s", req.Email, userID)
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":    userID,
-		"email": req.Email,
-	})
+	writeJSON(w, http.StatusCreated, authResponse{ID: userID, Email: req.Email, Role: role})
 }
 
 func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
@@ -106,11 +110,12 @@ func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	var userID string
 	var passwordHash string
+	var role string
 	err := h.DB.QueryRow(ctx, `
-		SELECT id, password_hash
+		SELECT id, password_hash, role
 		FROM users
 		WHERE email = $1
-	`, req.Email).Scan(&userID, &passwordHash)
+	`, req.Email).Scan(&userID, &passwordHash, &role)
 	if err != nil {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
 		return
@@ -121,7 +126,7 @@ func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := h.JWTManager.Generate(userID, req.Email)
+	token, err := h.JWTManager.Generate(userID, req.Email, role)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate session"})
 		return
@@ -139,10 +144,7 @@ func (h AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("[auth] login success email=%s user_id=%s", req.Email, userID)
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"id":    userID,
-		"email": req.Email,
-	})
+	writeJSON(w, http.StatusOK, authResponse{ID: userID, Email: req.Email, Role: role})
 }
 
 func (h AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
@@ -171,5 +173,6 @@ func (h AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"id":    user.UserID,
 		"email": user.Email,
+		"role":  user.Role,
 	})
 }

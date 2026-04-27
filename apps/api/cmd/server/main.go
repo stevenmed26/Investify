@@ -36,6 +36,9 @@ func main() {
 	if err := syncTickerRegistry(pool); err != nil {
 		log.Printf("WARNING: ticker registry sync failed: %v", err)
 	}
+	if err := ensureDevAdmin(pool); err != nil {
+		log.Printf("WARNING: dev admin seed failed: %v", err)
+	}
 
 	// Build services
 	encryptor := security.NewEncryptor(cfg.AppEncryptionKey)
@@ -157,4 +160,44 @@ func syncTickerRegistry(pool *pgxpool.Pool) error {
 	}
 	log.Printf("[registry] synced tickers inserted=%d updated=%d", inserted, updated)
 	return nil
+}
+
+func ensureDevAdmin(pool *pgxpool.Pool) error {
+	if isProduction() {
+		return nil
+	}
+
+	passwordHash := strings.TrimSpace(os.Getenv("DEV_ADMIN_PASSWORD_HASH"))
+	if passwordHash == "" {
+		return nil
+	}
+
+	email := strings.TrimSpace(strings.ToLower(os.Getenv("DEV_ADMIN_EMAIL")))
+	if email == "" {
+		email = "admin@investify.com"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO users (email, password_hash, role, created_at, updated_at)
+		VALUES ($1, $2, 'admin', NOW(), NOW())
+		ON CONFLICT (email)
+		DO UPDATE SET
+			password_hash = EXCLUDED.password_hash,
+			role = 'admin',
+			updated_at = NOW()
+	`, email, passwordHash)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[dev-admin] ensured admin user email=%s", email)
+	return nil
+}
+
+func isProduction() bool {
+	env := os.Getenv("APP_ENV")
+	return env == "production" || env == "prod"
 }
