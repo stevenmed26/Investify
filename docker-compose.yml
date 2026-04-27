@@ -1,17 +1,13 @@
 services:
-
-  # ── PostgreSQL ────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_DB:       ${POSTGRES_DB}
-      POSTGRES_USER:     ${POSTGRES_USER}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      # Persist data across container restarts and upgrades
       - postgres_data:/var/lib/postgresql/data
-      # All .sql files in migrations/ are run in filename order on first init
       - ./apps/migrations:/docker-entrypoint-initdb.d:ro
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
@@ -22,7 +18,6 @@ services:
       retries: 10
       start_period: 10s
 
-  # ── Go API ────────────────────────────────────────────────────────────────
   api:
     build:
       context: ./apps
@@ -35,8 +30,8 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      # Override DB connection to use the Docker service name
       API_DB_HOST: postgres
+      API_ML_INTERNAL_TOKEN: ${ML_INTERNAL_TOKEN}
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health || exit 1"]
       interval: 10s
@@ -44,7 +39,6 @@ services:
       retries: 5
       start_period: 15s
 
-  # ── Python ML service ─────────────────────────────────────────────────────
   ml-service:
     build:
       context: ./apps/ml-service
@@ -56,11 +50,14 @@ services:
       postgres:
         condition: service_healthy
     env_file: .env
+    environment:
+      ML_DB_HOST: postgres
+      ML_DB_PORT: 5432
+      ML_DB_NAME: ${POSTGRES_DB}
+      ML_DB_USER: ${POSTGRES_USER}
+      ML_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      ML_INTERNAL_TOKEN: ${ML_INTERNAL_TOKEN}
     volumes:
-      # CRITICAL: persist the trained model across container restarts.
-      # Without this volume, every `docker compose up --build` discards
-      # the model and the service falls back to rule-based predictions
-      # until someone manually re-triggers training.
       - ml_artifacts:/app/artifacts
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
@@ -69,14 +66,11 @@ services:
       retries: 5
       start_period: 30s
 
-  # ── Next.js web app ───────────────────────────────────────────────────────
   web:
     build:
       context: ./apps/web
       dockerfile: Dockerfile
       args:
-        # NEXT_PUBLIC_* vars are baked in at build time by Next.js.
-        # They must be passed as build args, not just runtime env vars.
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
     restart: unless-stopped
     ports:
@@ -88,15 +82,12 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      # Internal service URLs (container-to-container, not exposed to browser)
       INTERNAL_API_BASE_URL: http://api:8080
-      INTERNAL_ML_BASE_URL:  http://ml-service:8000
+      INTERNAL_ML_BASE_URL: http://ml-service:8000
+      INTERNAL_ML_TOKEN: ${ML_INTERNAL_TOKEN}
 
 volumes:
-  # Named volume — survives `docker compose down` (but not `down -v`)
   postgres_data:
     driver: local
-
-  # Stores current_model.joblib so retraining isn't lost on restart
   ml_artifacts:
     driver: local
