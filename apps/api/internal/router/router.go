@@ -138,6 +138,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 				r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
 				r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
 				r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
+				r.Get("/admin/pipeline/health", adminHandler.GetPipelineHealth)
 				r.Get("/admin/jobs/{jobID}", adminHandler.GetJobStatus)
 			})
 		})

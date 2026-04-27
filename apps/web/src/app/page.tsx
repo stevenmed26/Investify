@@ -1,3 +1,4 @@
+import PipelineHealth from "./components/PipelineHealth";
 import TickerList from "./components/TickerList";
 
 type Ticker = {
@@ -33,6 +34,8 @@ export default async function HomePage() {
             {tickers.length} active tickers - predictions updated daily after market close
           </p>
         </div>
+
+        <PipelineHealth />
 
         {tickers.length === 0 ? (
           <div className="rounded-2xl border border-white/10 bg-white/5 p-12 text-center text-slate-400">

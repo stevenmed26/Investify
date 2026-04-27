@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -30,6 +31,21 @@ type setTwelveDataKeyRequest struct {
 
 type batchIngestRequest struct {
 	Symbols []string `json:"symbols"`
+}
+
+type pipelineTickerHealth struct {
+	Symbol          string   `json:"symbol"`
+	CompanyName     string   `json:"company_name"`
+	Exchange        string   `json:"exchange"`
+	PriceRows       int64    `json:"price_rows"`
+	FeatureRows     int64    `json:"feature_rows"`
+	LatestPrice     *string  `json:"latest_price,omitempty"`
+	LatestFeature   *string  `json:"latest_feature,omitempty"`
+	HistoryReady    bool     `json:"history_ready"`
+	FeaturesReady   bool     `json:"features_ready"`
+	PredictionReady bool     `json:"prediction_ready"`
+	Status          string   `json:"status"`
+	Issues          []string `json:"issues"`
 }
 
 func (h AdminHandler) SetTwelveDataAPIKey(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +179,180 @@ func (h AdminHandler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, job)
+}
+
+func (h AdminHandler) GetPipelineHealth(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	rows, err := h.DB.Query(ctx, `
+		SELECT
+			t.symbol,
+			t.company_name,
+			COALESCE(t.exchange, '') AS exchange,
+			COUNT(DISTINCT hp.trading_date) AS price_rows,
+			COUNT(DISTINCT tf.trading_date) AS feature_rows,
+			MAX(hp.trading_date)::text AS latest_price,
+			MAX(tf.trading_date)::text AS latest_feature,
+			(
+				lf.trading_date IS NOT NULL
+				AND lf.sma_20 IS NOT NULL
+				AND lf.sma_50 IS NOT NULL
+				AND lf.ema_12 IS NOT NULL
+				AND lf.ema_26 IS NOT NULL
+				AND lf.rsi_14 IS NOT NULL
+				AND lf.macd IS NOT NULL
+				AND lf.momentum_5d IS NOT NULL
+				AND lf.momentum_20d IS NOT NULL
+				AND lf.volatility_20d IS NOT NULL
+				AND lf.volume_ratio_20d IS NOT NULL
+			) AS latest_feature_complete
+		FROM tickers t
+		LEFT JOIN historical_prices hp ON hp.ticker_id = t.id
+		LEFT JOIN technical_features tf ON tf.ticker_id = t.id
+		LEFT JOIN LATERAL (
+			SELECT
+				trading_date,
+				sma_20,
+				sma_50,
+				ema_12,
+				ema_26,
+				rsi_14,
+				macd,
+				momentum_5d,
+				momentum_20d,
+				volatility_20d,
+				volume_ratio_20d
+			FROM technical_features
+			WHERE ticker_id = t.id
+			ORDER BY trading_date DESC
+			LIMIT 1
+		) lf ON TRUE
+		WHERE t.is_active = TRUE
+		GROUP BY
+			t.id,
+			lf.trading_date,
+			lf.sma_20,
+			lf.sma_50,
+			lf.ema_12,
+			lf.ema_26,
+			lf.rsi_14,
+			lf.macd,
+			lf.momentum_5d,
+			lf.momentum_20d,
+			lf.volatility_20d,
+			lf.volume_ratio_20d
+		ORDER BY t.symbol ASC
+	`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch pipeline health"})
+		return
+	}
+	defer rows.Close()
+
+	tickers := make([]pipelineTickerHealth, 0)
+	summary := map[string]int{
+		"total":            0,
+		"history_ready":    0,
+		"features_ready":   0,
+		"prediction_ready": 0,
+		"warnings":         0,
+		"missing":          0,
+	}
+
+	for rows.Next() {
+		var item pipelineTickerHealth
+		var latestPrice sql.NullString
+		var latestFeature sql.NullString
+		var latestFeatureComplete bool
+
+		if err := rows.Scan(
+			&item.Symbol,
+			&item.CompanyName,
+			&item.Exchange,
+			&item.PriceRows,
+			&item.FeatureRows,
+			&latestPrice,
+			&latestFeature,
+			&latestFeatureComplete,
+		); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to scan pipeline health"})
+			return
+		}
+
+		if latestPrice.Valid {
+			item.LatestPrice = &latestPrice.String
+		}
+		if latestFeature.Valid {
+			item.LatestFeature = &latestFeature.String
+		}
+
+		item.HistoryReady = item.PriceRows >= 55
+		item.FeaturesReady = item.FeatureRows >= 55
+		item.PredictionReady = item.HistoryReady && item.FeaturesReady && latestFeatureComplete
+		item.Issues = pipelineIssues(item, latestFeatureComplete)
+		item.Status = pipelineStatus(item)
+
+		summary["total"]++
+		if item.HistoryReady {
+			summary["history_ready"]++
+		}
+		if item.FeaturesReady {
+			summary["features_ready"]++
+		}
+		if item.PredictionReady {
+			summary["prediction_ready"]++
+		}
+		if item.Status == "warning" {
+			summary["warnings"]++
+		}
+		if item.Status == "missing" {
+			summary["missing"]++
+		}
+
+		tickers = append(tickers, item)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"summary": summary,
+		"tickers": tickers,
+	})
+}
+
+func pipelineIssues(item pipelineTickerHealth, latestFeatureComplete bool) []string {
+	issues := make([]string, 0)
+
+	if item.PriceRows == 0 {
+		issues = append(issues, "no price history")
+	} else if !item.HistoryReady {
+		issues = append(issues, "fewer than 55 price rows")
+	}
+
+	if item.FeatureRows == 0 {
+		issues = append(issues, "no technical features")
+	} else if !item.FeaturesReady {
+		issues = append(issues, "fewer than 55 feature rows")
+	}
+
+	if item.LatestPrice != nil && item.LatestFeature != nil && *item.LatestFeature < *item.LatestPrice {
+		issues = append(issues, "features behind prices")
+	}
+
+	if item.FeatureRows > 0 && !latestFeatureComplete {
+		issues = append(issues, "latest feature row has null indicators")
+	}
+
+	return issues
+}
+
+func pipelineStatus(item pipelineTickerHealth) string {
+	if item.PredictionReady && len(item.Issues) == 0 {
+		return "ready"
+	}
+	if item.PriceRows == 0 || item.FeatureRows == 0 {
+		return "missing"
+	}
+	return "warning"
 }
 
 func (h AdminHandler) resolveSymbols(ctx context.Context, requested []string) ([]string, error) {
