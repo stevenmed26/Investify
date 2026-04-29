@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"investify/apps/api/internal/jobs"
@@ -186,6 +187,62 @@ func (h AdminHandler) BatchBackfillFeatures(w http.ResponseWriter, r *http.Reque
 	})
 }
 
+func (h AdminHandler) EnqueueDailyPipeline(w http.ResponseWriter, r *http.Request) {
+	user, ok := middleware.GetAuthUser(r.Context())
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthorized"})
+		return
+	}
+
+	days := queryInt(r, "days", 365, 1, 5000)
+	delayMS := queryInt(r, "delay_ms", 7500, 0, 60000)
+	horizonDays := queryInt(r, "horizon_days", 5, 1, 60)
+
+	var req batchIngestRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	symbols := req.Symbols
+	if len(symbols) == 0 && r.URL.Query().Get("symbols") != "" {
+		symbols = splitSymbols(r.URL.Query().Get("symbols"))
+	}
+
+	payload := map[string]any{
+		"user_id":      user.UserID,
+		"days":         days,
+		"delay_ms":     delayMS,
+		"horizon_days": horizonDays,
+		"source":       "admin",
+	}
+	if len(symbols) > 0 {
+		payload["symbols"] = symbols
+	}
+
+	job, err := h.JobManager.CreateWithPayload(
+		"daily_pipeline",
+		"Queued daily pipeline job.",
+		payload,
+		map[string]any{
+			"source":       "admin",
+			"symbol_count": len(symbols),
+		},
+		3,
+	)
+	if err != nil {
+		log.Printf("[admin] failed enqueueing daily pipeline job user_id=%s err=%v", user.UserID, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to enqueue job"})
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"job_id":       job.ID,
+		"status":       job.Status,
+		"days":         days,
+		"delay_ms":     delayMS,
+		"horizon_days": horizonDays,
+		"symbol_count": len(symbols),
+	})
+}
+
 func (h AdminHandler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	jobID := chi.URLParam(r, "jobID")
 	job, ok := h.JobManager.Get(jobID)
@@ -242,4 +299,28 @@ func (h AdminHandler) resolveSymbols(ctx context.Context, requested []string) ([
 	}
 
 	return symbols, nil
+}
+
+func queryInt(r *http.Request, key string, fallback, min, max int) int {
+	raw := r.URL.Query().Get(key)
+	if raw == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(raw)
+	if err != nil || parsed < min || parsed > max {
+		return fallback
+	}
+	return parsed
+}
+
+func splitSymbols(raw string) []string {
+	parts := strings.Split(raw, ",")
+	symbols := make([]string, 0, len(parts))
+	for _, part := range parts {
+		symbol := strings.ToUpper(strings.TrimSpace(part))
+		if symbol != "" {
+			symbols = append(symbols, symbol)
+		}
+	}
+	return symbols
 }

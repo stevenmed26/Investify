@@ -8,10 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"investify/apps/api/internal/clients/mlclient"
 	"investify/apps/api/internal/services"
 )
 
 const (
+	jobDailyPipeline         = "daily_pipeline"
 	jobBatchIngestHistory    = "batch_ingest_history"
 	jobBatchBackfillFeatures = "batch_backfill_features"
 )
@@ -21,6 +23,7 @@ type Worker struct {
 	Manager          *Manager
 	PriceIngestionSV *services.PriceIngestionService
 	FeatureSV        *services.FeatureEngineeringService
+	MLClient         *mlclient.Client
 	PollInterval     time.Duration
 }
 
@@ -30,12 +33,18 @@ type itemResult struct {
 	Error         string `json:"error,omitempty"`
 }
 
-func NewWorker(manager *Manager, priceIngestionSV *services.PriceIngestionService, featureSV *services.FeatureEngineeringService) *Worker {
+func NewWorker(
+	manager *Manager,
+	priceIngestionSV *services.PriceIngestionService,
+	featureSV *services.FeatureEngineeringService,
+	mlClient *mlclient.Client,
+) *Worker {
 	return &Worker{
 		ID:               "api-worker-" + newID()[:8],
 		Manager:          manager,
 		PriceIngestionSV: priceIngestionSV,
 		FeatureSV:        featureSV,
+		MLClient:         mlClient,
 		PollInterval:     2 * time.Second,
 	}
 }
@@ -58,7 +67,7 @@ func (w *Worker) Start(ctx context.Context) {
 		default:
 		}
 
-		job, ok, err := w.Manager.ClaimNext(w.ID, []string{jobBatchIngestHistory, jobBatchBackfillFeatures})
+		job, ok, err := w.Manager.ClaimNext(w.ID, []string{jobDailyPipeline, jobBatchIngestHistory, jobBatchBackfillFeatures})
 		if err != nil {
 			log.Printf("[jobs] claim failed worker_id=%s err=%v", w.ID, err)
 			sleepOrDone(ctx, w.PollInterval)
@@ -77,6 +86,8 @@ func (w *Worker) runJob(job Job) {
 	var err error
 
 	switch job.Name {
+	case jobDailyPipeline:
+		err = w.runDailyPipelineJob(job)
 	case jobBatchIngestHistory:
 		err = w.runBatchIngestJob(job)
 	case jobBatchBackfillFeatures:
@@ -100,6 +111,106 @@ func (w *Worker) runJob(job Job) {
 	}
 
 	w.Manager.MarkFailed(job.ID, "Job failed.", err.Error())
+}
+
+func (w *Worker) runDailyPipelineJob(job Job) error {
+	if w.PriceIngestionSV == nil {
+		return fmt.Errorf("price ingestion service is not configured")
+	}
+	if w.FeatureSV == nil {
+		return fmt.Errorf("feature engineering service is not configured")
+	}
+
+	symbols := stringSlicePayload(job.Payload, "symbols")
+	if len(symbols) == 0 {
+		var err error
+		symbols, err = w.activeSymbols(context.Background())
+		if err != nil {
+			return err
+		}
+	}
+	if len(symbols) == 0 {
+		return fmt.Errorf("no active symbols found")
+	}
+
+	days := intPayload(job.Payload, "days", 365)
+	delayMS := intPayload(job.Payload, "delay_ms", 7500)
+	horizonDays := intPayload(job.Payload, "horizon_days", 5)
+
+	w.Manager.UpdateMessage(job.ID, "Daily pipeline is running.")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	defer cancel()
+
+	ingestResults := make([]itemResult, 0, len(symbols))
+	ingestOK, ingestFail := 0, 0
+	for i, symbol := range symbols {
+		w.Manager.UpdateMessage(job.ID, "Pipeline ingest "+symbol+" ("+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(symbols))+").")
+
+		rowsProcessed, err := w.PriceIngestionSV.IngestBySymbol(ctx, symbol, days)
+		if err != nil {
+			log.Printf("[pipeline] ingest failed job_id=%s symbol=%s err=%v", job.ID, symbol, err)
+			ingestFail++
+			ingestResults = append(ingestResults, itemResult{Symbol: symbol, Error: err.Error()})
+		} else {
+			ingestOK++
+			ingestResults = append(ingestResults, itemResult{Symbol: symbol, RowsProcessed: rowsProcessed})
+		}
+
+		if i < len(symbols)-1 && delayMS > 0 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("daily pipeline ingest timed out: %w", ctx.Err())
+			case <-time.After(time.Duration(delayMS) * time.Millisecond):
+			}
+		}
+	}
+
+	featureResults := make([]itemResult, 0, len(symbols))
+	featureOK, featureFail := 0, 0
+	for i, symbol := range symbols {
+		w.Manager.UpdateMessage(job.ID, "Pipeline features "+symbol+" ("+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(symbols))+").")
+
+		rowsProcessed, err := w.FeatureSV.BackfillBySymbol(ctx, symbol)
+		if err != nil {
+			log.Printf("[pipeline] feature backfill failed job_id=%s symbol=%s err=%v", job.ID, symbol, err)
+			featureFail++
+			featureResults = append(featureResults, itemResult{Symbol: symbol, Error: err.Error()})
+		} else {
+			featureOK++
+			featureResults = append(featureResults, itemResult{Symbol: symbol, RowsProcessed: rowsProcessed})
+		}
+	}
+
+	var trainingResult map[string]any
+	if w.MLClient != nil {
+		w.Manager.UpdateMessage(job.ID, "Pipeline training queued.")
+		trainingJob, err := w.MLClient.Train(ctx, horizonDays)
+		if err != nil {
+			log.Printf("[pipeline] training enqueue failed job_id=%s err=%v", job.ID, err)
+			trainingResult = map[string]any{"error": err.Error(), "horizon_days": horizonDays}
+		} else {
+			trainingResult = map[string]any{
+				"job_id":       trainingJob.JobID,
+				"status":       trainingJob.Status,
+				"horizon_days": trainingJob.HorizonDays,
+			}
+		}
+	}
+
+	w.Manager.MarkCompleted(job.ID, "Daily pipeline completed.", map[string]any{
+		"days":            days,
+		"delay_ms":        delayMS,
+		"horizon_days":    horizonDays,
+		"symbol_count":    len(symbols),
+		"ingest_ok":       ingestOK,
+		"ingest_failed":   ingestFail,
+		"feature_ok":      featureOK,
+		"feature_failed":  featureFail,
+		"ingest_results":  ingestResults,
+		"feature_results": featureResults,
+		"training":        trainingResult,
+	})
+	return nil
 }
 
 func (w *Worker) runBatchIngestJob(job Job) error {
@@ -185,6 +296,39 @@ func (w *Worker) runBatchBackfillJob(job Job) error {
 		"results": results,
 	})
 	return nil
+}
+
+func (w *Worker) activeSymbols(ctx context.Context) ([]string, error) {
+	if w.PriceIngestionSV == nil || w.PriceIngestionSV.DB == nil {
+		return nil, fmt.Errorf("database is not configured")
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	rows, err := w.PriceIngestionSV.DB.Query(ctx, `
+		SELECT symbol
+		FROM tickers
+		WHERE is_active = TRUE
+		ORDER BY symbol ASC
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("fetch active tickers: %w", err)
+	}
+	defer rows.Close()
+
+	symbols := make([]string, 0)
+	for rows.Next() {
+		var symbol string
+		if err := rows.Scan(&symbol); err != nil {
+			return nil, fmt.Errorf("scan active ticker: %w", err)
+		}
+		symbol = strings.ToUpper(strings.TrimSpace(symbol))
+		if symbol != "" {
+			symbols = append(symbols, symbol)
+		}
+	}
+	return symbols, rows.Err()
 }
 
 func stringPayload(payload map[string]any, key string) string {

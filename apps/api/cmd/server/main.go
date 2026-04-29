@@ -13,11 +13,8 @@ import (
 
 	"investify/apps/api/internal/config"
 	"investify/apps/api/internal/db"
-	"investify/apps/api/internal/marketdata"
 	"investify/apps/api/internal/router"
 	"investify/apps/api/internal/scheduler"
-	"investify/apps/api/internal/security"
-	"investify/apps/api/internal/services"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -40,33 +37,6 @@ func main() {
 		log.Printf("WARNING: dev admin seed failed: %v", err)
 	}
 
-	// Build services
-	encryptor := security.NewEncryptor(cfg.AppEncryptionKey)
-	credentialService := &services.CredentialService{
-		DB:        pool,
-		Encryptor: encryptor,
-	}
-
-	providerName := os.Getenv("MARKET_DATA_PROVIDER")
-	twelveDataBaseURL := os.Getenv("TWELVE_DATA_BASE_URL")
-	var provider marketdata.Provider
-	if providerName == "twelvedata" {
-		log.Printf("[marketdata] provider=twelvedata")
-		provider = marketdata.NewTwelveDataProvider(twelveDataBaseURL)
-	} else {
-		log.Printf("[marketdata] provider=dev-synthetic")
-		provider = marketdata.NewDevProvider()
-		providerName = "dev"
-	}
-
-	priceService := &services.PriceIngestionService{
-		DB:                pool,
-		Provider:          provider,
-		CredentialService: credentialService,
-		ProviderName:      providerName,
-	}
-	featureService := &services.FeatureEngineeringService{DB: pool}
-
 	r := router.New(cfg, pool)
 
 	// Graceful shutdown
@@ -82,8 +52,6 @@ func main() {
 			MLToken:       cfg.MLInternalToken,
 		},
 		pool,
-		priceService,
-		featureService,
 	)
 	go sched.Start(ctx)
 

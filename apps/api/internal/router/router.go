@@ -75,7 +75,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		ProviderName:      providerName,
 	}
 	featureService := &services.FeatureEngineeringService{DB: db}
-	go jobs.NewWorker(jobManager, priceIngestionService, featureService).Start(context.Background())
+	go jobs.NewWorker(jobManager, priceIngestionService, featureService, ml).Start(context.Background())
 
 	authHandler := handlers.AuthHandler{DB: db, JWTManager: jwtManager}
 	tickerHandler := handlers.TickerHandler{DB: db, MLClient: ml}
@@ -140,6 +140,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 				r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
 				r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
 				r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
+				r.Post("/admin/pipeline/daily", adminHandler.EnqueueDailyPipeline)
 				r.Get("/admin/jobs", adminHandler.ListJobs)
 				r.Get("/admin/jobs/{jobID}", adminHandler.GetJobStatus)
 			})
