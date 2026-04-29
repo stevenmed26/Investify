@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"math"
 	"strings"
@@ -74,6 +75,11 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 		return 0, fmt.Errorf("no historical prices found")
 	}
 
+	writeFrom, err := s.featureWriteFromDate(ctx, tickerID)
+	if err != nil {
+		return 0, err
+	}
+
 	features := computeFeatureRows(prices)
 
 	tx, err := s.DB.Begin(ctx)
@@ -84,6 +90,10 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 
 	count := 0
 	for _, f := range features {
+		if writeFrom != "" && f.TradingDate < writeFrom {
+			continue
+		}
+
 		_, err := tx.Exec(ctx, `
 			INSERT INTO technical_features (
 				ticker_id,
@@ -139,6 +149,26 @@ func (s *FeatureEngineeringService) BackfillBySymbol(ctx context.Context, symbol
 	}
 
 	return count, nil
+}
+
+func (s *FeatureEngineeringService) featureWriteFromDate(ctx context.Context, tickerID string) (string, error) {
+	var latestFeature sql.NullTime
+	if err := s.DB.QueryRow(ctx, `
+		SELECT MAX(trading_date)
+		FROM technical_features
+		WHERE ticker_id = $1
+	`, tickerID).Scan(&latestFeature); err != nil {
+		return "", fmt.Errorf("check latest feature date: %w", err)
+	}
+
+	if !latestFeature.Valid {
+		return "", nil
+	}
+
+	// Re-write the affected tail with enough history for 50-day SMA, 26-day EMA,
+	// 20-day momentum/volatility, and RSI smoothing. The full price history is
+	// still used to compute indicator values, but only this tail is upserted.
+	return latestFeature.Time.AddDate(0, 0, -90).Format(time.DateOnly), nil
 }
 
 func computeFeatureRows(prices []pricePoint) []computedFeatureRow {

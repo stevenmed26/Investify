@@ -79,6 +79,7 @@ func main() {
 			RunHour:       22, // 10pm UTC ≈ 6pm ET, after US market close
 			DaysOfHistory: 365,
 			MLBaseURL:     cfg.MLBaseURL,
+			MLToken:       cfg.MLInternalToken,
 		},
 		pool,
 		priceService,

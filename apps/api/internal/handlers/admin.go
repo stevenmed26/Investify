@@ -165,6 +165,25 @@ func (h AdminHandler) GetJobStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
+func (h AdminHandler) ListJobs(w http.ResponseWriter, r *http.Request) {
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 200 {
+			limit = parsed
+		}
+	}
+
+	jobs, err := h.JobManager.List(r.URL.Query().Get("service"), r.URL.Query().Get("status"), limit)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to fetch jobs"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"jobs": jobs,
+	})
+}
+
 func (h AdminHandler) resolveSymbols(ctx context.Context, requested []string) ([]string, error) {
 	if len(requested) > 0 {
 		return requested, nil

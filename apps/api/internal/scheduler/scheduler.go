@@ -18,6 +18,7 @@ type PipelineConfig struct {
 	RunHour       int
 	DaysOfHistory int
 	MLBaseURL     string
+	MLToken       string
 }
 
 type Runner struct {
@@ -124,7 +125,7 @@ func (r *Runner) runPipeline(ctx context.Context) {
 	if err := r.triggerTraining(ctx); err != nil {
 		log.Printf("[pipeline] ML training failed: %v", err)
 	} else {
-		log.Printf("[pipeline] ML training complete")
+		log.Printf("[pipeline] ML training queued")
 	}
 
 	log.Printf("[pipeline] daily run finished duration=%s", time.Since(start).Round(time.Second))
@@ -157,9 +158,12 @@ func (r *Runner) triggerTraining(ctx context.Context) error {
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(tctx, http.MethodPost,
-		r.cfg.MLBaseURL+"/train?horizon_days=5", nil)
+		r.cfg.MLBaseURL+"/train/jobs?horizon_days=5", nil)
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
+	}
+	if r.cfg.MLToken != "" {
+		req.Header.Set("X-Internal-Token", r.cfg.MLToken)
 	}
 
 	resp, err := http.DefaultClient.Do(req)

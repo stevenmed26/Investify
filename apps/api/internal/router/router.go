@@ -53,7 +53,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		Encryptor: encryptor,
 	}
 	ml := mlclient.New(cfg.MLBaseURL, cfg.MLInternalToken)
-	jobManager := jobs.NewManager()
+	jobManager := jobs.NewManager(db)
 
 	providerName := os.Getenv("MARKET_DATA_PROVIDER")
 	twelveDataBaseURL := os.Getenv("TWELVE_DATA_BASE_URL")
@@ -138,6 +138,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 				r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
 				r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
 				r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
+				r.Get("/admin/jobs", adminHandler.ListJobs)
 				r.Get("/admin/jobs/{jobID}", adminHandler.GetJobStatus)
 			})
 		})
