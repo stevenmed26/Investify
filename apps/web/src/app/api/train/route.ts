@@ -3,15 +3,24 @@ import { NextRequest, NextResponse } from "next/server";
 const API_BASE_URL = process.env.INTERNAL_API_BASE_URL ?? "http://api:8080";
 const ML_BASE_URL = process.env.INTERNAL_ML_BASE_URL ?? "http://localhost:8000";
 const ML_TOKEN = process.env.INTERNAL_ML_TOKEN ?? "dev-ml-internal-token";
+const LOCAL_TOKEN = process.env.INVESTIFY_LOCAL_TOKEN ?? process.env.LOCAL_ADMIN_TOKEN ?? "";
 
 async function authorize(req: NextRequest) {
   const cookie = req.cookies.get("investify_token");
-  if (!cookie?.value) {
+  if (!cookie?.value && !LOCAL_TOKEN) {
     return { error: NextResponse.json({ error: "unauthorized" }, { status: 401 }) };
   }
 
+  const headers: HeadersInit = {};
+  if (cookie?.value) {
+    headers.Cookie = `investify_token=${cookie.value}`;
+  }
+  if (LOCAL_TOKEN) {
+    headers["X-Local-Token"] = LOCAL_TOKEN;
+  }
+
   const authRes = await fetch(`${API_BASE_URL}/api/v1/auth/me`, {
-    headers: { Cookie: `investify_token=${cookie.value}` },
+    headers,
     cache: "no-store",
   }).catch(() => null);
 
@@ -20,8 +29,8 @@ async function authorize(req: NextRequest) {
   }
 
   const me = await authRes.json().catch(() => null);
-  if (!me || me.role !== "admin") {
-    return { error: NextResponse.json({ error: "admin access required" }, { status: 403 }) };
+  if (!me || (me.role !== "admin" && me.role !== "operator")) {
+    return { error: NextResponse.json({ error: "operator access required" }, { status: 403 }) };
   }
 
   return { me };

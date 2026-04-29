@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"investify/apps/api/internal/jobs"
+	"investify/apps/api/internal/local"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -69,6 +70,7 @@ func (r *Runner) runPipeline(ctx context.Context) {
 		"daily_pipeline",
 		"Queued scheduled daily pipeline.",
 		map[string]any{
+			"user_id":      local.OperatorUserID,
 			"days":         r.cfg.DaysOfHistory,
 			"delay_ms":     7500,
 			"horizon_days": 5,

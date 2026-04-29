@@ -23,7 +23,8 @@ func (s *CredentialService) UpsertAPIKey(ctx context.Context, userID, provider, 
 		return fmt.Errorf("userID, provider, and apiKey are required")
 	}
 
-	encrypted, err := s.Encryptor.Encrypt(apiKey)
+	aad := credentialAAD(userID, provider)
+	encrypted, err := s.Encryptor.EncryptWithAAD(apiKey, aad)
 	if err != nil {
 		return fmt.Errorf("encrypt api key: %w", err)
 	}
@@ -82,10 +83,14 @@ func (s *CredentialService) GetAPIKey(ctx context.Context, userID, provider stri
 		return "", fmt.Errorf("fetch credential: %w", err)
 	}
 
-	plaintext, err := s.Encryptor.Decrypt(encrypted)
+	plaintext, err := s.Encryptor.DecryptWithAAD(encrypted, credentialAAD(userID, provider))
 	if err != nil {
 		return "", fmt.Errorf("decrypt credential: %w", err)
 	}
 
 	return plaintext, nil
+}
+
+func credentialAAD(userID, provider string) []byte {
+	return []byte(strings.TrimSpace(userID) + ":" + strings.ToLower(strings.TrimSpace(provider)))
 }

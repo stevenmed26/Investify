@@ -156,7 +156,10 @@ func (h AdminHandler) BatchBackfillFeatures(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	symbols, err := h.resolveSymbols(context.Background(), nil)
+	var req batchIngestRequest
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	symbols, err := h.resolveSymbols(context.Background(), req.Symbols)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -211,7 +214,7 @@ func (h AdminHandler) EnqueueDailyPipeline(w http.ResponseWriter, r *http.Reques
 		"days":         days,
 		"delay_ms":     delayMS,
 		"horizon_days": horizonDays,
-		"source":       "admin",
+		"source":       "operator",
 	}
 	if len(symbols) > 0 {
 		payload["symbols"] = symbols
@@ -222,7 +225,7 @@ func (h AdminHandler) EnqueueDailyPipeline(w http.ResponseWriter, r *http.Reques
 		"Queued daily pipeline job.",
 		payload,
 		map[string]any{
-			"source":       "admin",
+			"source":       "operator",
 			"symbol_count": len(symbols),
 		},
 		3,

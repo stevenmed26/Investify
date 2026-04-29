@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"investify/apps/api/internal/clients/mlclient"
+	"investify/apps/api/internal/local"
 	"investify/apps/api/internal/services"
 )
 
@@ -136,6 +137,10 @@ func (w *Worker) runDailyPipelineJob(job Job) error {
 	days := intPayload(job.Payload, "days", 365)
 	delayMS := intPayload(job.Payload, "delay_ms", 7500)
 	horizonDays := intPayload(job.Payload, "horizon_days", 5)
+	userID := stringPayload(job.Payload, "user_id")
+	if userID == "" {
+		userID = local.OperatorUserID
+	}
 
 	w.Manager.UpdateMessage(job.ID, "Daily pipeline is running.")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
@@ -146,7 +151,7 @@ func (w *Worker) runDailyPipelineJob(job Job) error {
 	for i, symbol := range symbols {
 		w.Manager.UpdateMessage(job.ID, "Pipeline ingest "+symbol+" ("+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(symbols))+").")
 
-		rowsProcessed, err := w.PriceIngestionSV.IngestBySymbol(ctx, symbol, days)
+		rowsProcessed, err := w.PriceIngestionSV.IngestBySymbolForUser(ctx, userID, symbol, days)
 		if err != nil {
 			log.Printf("[pipeline] ingest failed job_id=%s symbol=%s err=%v", job.ID, symbol, err)
 			ingestFail++

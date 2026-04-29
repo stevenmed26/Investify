@@ -13,6 +13,7 @@ import (
 
 	"investify/apps/api/internal/config"
 	"investify/apps/api/internal/db"
+	"investify/apps/api/internal/local"
 	"investify/apps/api/internal/router"
 	"investify/apps/api/internal/scheduler"
 
@@ -33,8 +34,13 @@ func main() {
 	if err := syncTickerRegistry(pool); err != nil {
 		log.Printf("WARNING: ticker registry sync failed: %v", err)
 	}
-	if err := ensureDevAdmin(pool); err != nil {
-		log.Printf("WARNING: dev admin seed failed: %v", err)
+	if !strings.EqualFold(cfg.AuthMode, "local") {
+		if err := ensureDevAdmin(pool); err != nil {
+			log.Printf("WARNING: dev admin seed failed: %v", err)
+		}
+	}
+	if err := ensureLocalOperator(pool); err != nil {
+		log.Printf("WARNING: local operator seed failed: %v", err)
 	}
 
 	r := router.New(cfg, pool)
@@ -163,6 +169,26 @@ func ensureDevAdmin(pool *pgxpool.Pool) error {
 	}
 
 	log.Printf("[dev-admin] ensured admin user email=%s", email)
+	return nil
+}
+
+func ensureLocalOperator(pool *pgxpool.Pool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	_, err := pool.Exec(ctx, `
+		INSERT INTO users (id, email, password_hash, role, created_at, updated_at)
+		VALUES ($1, $2, 'local-operator-no-password', 'admin', NOW(), NOW())
+		ON CONFLICT (id)
+		DO UPDATE SET
+			email = EXCLUDED.email,
+			updated_at = NOW()
+	`, local.OperatorUserID, local.OperatorEmail)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("[local] ensured local operator email=%s", local.OperatorEmail)
 	return nil
 }
 

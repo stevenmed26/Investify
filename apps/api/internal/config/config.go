@@ -16,6 +16,8 @@ type Config struct {
 	MLInternalToken  string
 	JWTSecret        string
 	AppEncryptionKey string
+	AuthMode         string
+	LocalAdminToken  string
 }
 
 func getEnv(key, fallback string) string {
@@ -55,6 +57,8 @@ func Load() Config {
 		MLInternalToken:  mlToken,
 		JWTSecret:        jwtSecret,
 		AppEncryptionKey: encKey,
+		AuthMode:         getEnv("AUTH_MODE", "local"),
+		LocalAdminToken:  os.Getenv("LOCAL_ADMIN_TOKEN"),
 	}
 }
 

@@ -43,7 +43,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   allowedOrigins,
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-Local-Token"},
 		AllowCredentials: true,
 	}))
 
@@ -89,8 +89,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		JobManager:        jobManager,
 	}
 
-	requireAuth := authmw.RequireAuth(jwtManager)
-	requireAdmin := authmw.RequireAdmin
+	requireAuth := authmw.RequireAuthForConfig(cfg, jwtManager)
 
 	// Rate limit auth endpoints: 10 attempts per minute per IP.
 	// This protects against brute-force and credential stuffing.
@@ -129,21 +128,16 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 			r.Get("/admin/provider-status", adminHandler.GetProviderStatus)
 			r.Post("/admin/secrets/twelvedata", adminHandler.SetTwelveDataAPIKey)
 
-			r.Group(func(r chi.Router) {
-				r.Use(requireAdmin)
-
-				// Ticker management (bulk add from UI/registry)
-				r.Post("/admin/tickers/bulk", tickerHandler.BulkUpsertTickers)
-
-				// Manual ingest/backfill kept for admin use but no longer surfaced in UI
-				r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
-				r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
-				r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
-				r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
-				r.Post("/admin/pipeline/daily", adminHandler.EnqueueDailyPipeline)
-				r.Get("/admin/jobs", adminHandler.ListJobs)
-				r.Get("/admin/jobs/{jobID}", adminHandler.GetJobStatus)
-			})
+			// Local operator controls. In local mode these are protected by the
+			// local token/loopback guard rather than hosted-style admin roles.
+			r.Post("/admin/tickers/bulk", tickerHandler.BulkUpsertTickers)
+			r.Post("/admin/ingest/{symbol}/history", priceHandler.IngestHistoricalPricesBySymbol)
+			r.Post("/admin/ingest/batch/history", adminHandler.BatchIngestHistory)
+			r.Post("/admin/features/{symbol}/backfill", featureHandler.BackfillFeaturesBySymbol)
+			r.Post("/admin/features/batch/backfill", adminHandler.BatchBackfillFeatures)
+			r.Post("/admin/pipeline/daily", adminHandler.EnqueueDailyPipeline)
+			r.Get("/admin/jobs", adminHandler.ListJobs)
+			r.Get("/admin/jobs/{jobID}", adminHandler.GetJobStatus)
 		})
 	})
 

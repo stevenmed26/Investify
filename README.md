@@ -4,7 +4,7 @@ Investify is a local-first stock analysis platform for ingesting market data,
 building technical indicators, training a shared ML model, and tracking a small
 portfolio. The app is split into three services:
 
-- `apps/web`: Next.js UI for market browsing, ticker detail pages, admin tools,
+- `apps/web`: Next.js UI for market browsing, ticker detail pages, local tools,
   and portfolio tracking.
 - `apps/api`: Go API for auth, tickers, holdings, market-data ingestion,
   feature generation, background jobs, and the daily pipeline scheduler.
@@ -39,6 +39,7 @@ returns predictions to the API.
 ```text
 apps/api                  Go API service
 apps/api/cmd/server       API entrypoint and scheduler startup
+apps/api/cmd/investify    Local CLI for pipeline and job control
 apps/api/cmd/hashpassword Local helper for bcrypt password hashes
 apps/api/internal/router  Route wiring and middleware
 apps/api/internal/handlers HTTP handlers
@@ -73,14 +74,14 @@ At minimum for real Twelve Data ingestion:
 
 ```env
 MARKET_DATA_PROVIDER=twelvedata
-TWELVE_DATA_API_KEY=<system pipeline key>
 ML_INTERNAL_TOKEN=<shared internal token>
 JWT_SECRET=<long random value>
 APP_ENCRYPTION_KEY=<long random value>
+AUTH_MODE=local
 ```
 
-`APP_ENCRYPTION_KEY` is used to encrypt per-user Twelve Data keys stored in
-`user_api_credentials`. Keep it stable for an existing database or those
+`APP_ENCRYPTION_KEY` encrypts your Twelve Data key in `user_api_credentials`
+using AES-GCM. Keep it stable for an existing database or saved provider
 credentials can no longer be decrypted.
 
 3. Start the stack:
@@ -99,29 +100,33 @@ Postgres initializes from `apps/migrations` only on first database creation. If
 you change migrations and need a clean database, use `docker compose down -v`
 and then start again.
 
-## Dev Admin Account
+## Local Operator Mode
 
-Admin-only actions include batch ingest, feature backfill, ticker bulk upsert,
-and training the shared model.
+Investify defaults to `AUTH_MODE=local`. In this mode the user/operator is the
+center of truth: there is one local operator identity, and pipeline work uses
+the operator's encrypted Twelve Data API key. No central server-level market data
+API key is required.
 
-The app can seed a local admin user at API startup. It never stores a plaintext
-password in source or SQL. Generate a bcrypt hash:
+For the tightest local setup, set a local token and use it from the CLI or web
+service:
+
+```env
+LOCAL_ADMIN_TOKEN=<long random local token>
+INVESTIFY_LOCAL_TOKEN=<same token for the CLI/web process>
+```
+
+Local mode accepts loopback/local-origin requests and also accepts
+`X-Local-Token` when `LOCAL_ADMIN_TOKEN` is configured. Password login can still
+be enabled for a LAN/shared deployment by setting `AUTH_MODE=password` and
+seeding a password user:
 
 ```powershell
 cd apps/api
 go run ./cmd/hashpassword
 ```
 
-Enter your chosen password, then add the printed hash to `.env`:
-
-```env
-DEV_ADMIN_EMAIL=admin@investify.com
-DEV_ADMIN_PASSWORD_HASH=<bcrypt hash>
-```
-
-Restart the API. In non-production environments the API will upsert that user,
-set the role to `admin`, and update the password hash. This seed is skipped when
-`APP_ENV=production` or `APP_ENV=prod`.
+Store the printed bcrypt hash in `DEV_ADMIN_PASSWORD_HASH`. This path is optional
+and is not used by default local mode.
 
 ## Core Data Flow
 
@@ -202,10 +207,13 @@ holding adds shares and recomputes weighted average cost basis.
 - `POST /api/v1/admin/ingest/batch/history?days=365&delay_ms=9000`
 - `POST /api/v1/admin/features/{symbol}/backfill`
 - `POST /api/v1/admin/features/batch/backfill`
+- `POST /api/v1/admin/pipeline/daily?days=365&delay_ms=7500&horizon_days=5`
+- `GET /api/v1/admin/jobs?service=api&status=queued&limit=50`
 - `GET /api/v1/admin/jobs/{jobID}`
 
-Batch ingest and feature backfill run as in-memory background jobs. Job history
-is not persisted across API restarts.
+Batch ingest, feature backfill, and daily pipeline runs are stored in
+`pipeline_jobs` and claimed by the local API worker. Job status and result
+payloads survive API restarts.
 
 ## ML Service Endpoints
 
@@ -237,15 +245,33 @@ admin.
 
 For local end-to-end data:
 
-1. Sign in as an admin user.
-2. Save a Twelve Data API key from the menu.
-3. Run batch historical ingest.
-4. Run feature backfill.
-5. Train the model.
+1. Start in local operator mode.
+2. Save your Twelve Data API key from the menu.
+3. Run the daily pipeline or queue batch historical ingest.
+4. Check job status from the admin UI or CLI.
+5. Train jobs are queued by the pipeline after feature backfill.
 6. Refresh ticker pages to see updated predictions.
 
 The daily scheduler also runs automatically from the API process at 22:00 UTC.
-It uses `TWELVE_DATA_API_KEY` from `.env`, not a per-user saved credential.
+It uses the local operator's encrypted Twelve Data key.
+
+### Local CLI
+
+The local CLI is a thin control surface over the API. In local mode it uses
+`INVESTIFY_LOCAL_TOKEN` when configured, or loopback access when no local token
+is set.
+
+```powershell
+cd apps/api
+$env:INVESTIFY_API_URL = "http://localhost:8080"
+$env:INVESTIFY_LOCAL_TOKEN = "<your local token>"
+
+go run ./cmd/investify pipeline run --days 365 --horizon 5
+go run ./cmd/investify jobs list --status queued
+go run ./cmd/investify jobs get <job-id>
+go run ./cmd/investify ingest --symbols AAPL,MSFT --days 365 --delay-ms 9000
+go run ./cmd/investify features backfill --symbols AAPL,MSFT
+```
 
 ## Why a Ticker Can Have Prices but No Prediction
 
