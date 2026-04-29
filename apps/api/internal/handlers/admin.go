@@ -119,8 +119,25 @@ func (h AdminHandler) BatchIngestHistory(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	job := h.JobManager.Create("batch_ingest_history", "Queued historical ingest job.")
-	go h.runBatchIngestJob(job.ID, user.UserID, symbols, days, delayMS)
+	job, err := h.JobManager.CreateWithPayload(
+		"batch_ingest_history",
+		"Queued historical ingest job.",
+		map[string]any{
+			"user_id":  user.UserID,
+			"symbols":  symbols,
+			"days":     days,
+			"delay_ms": delayMS,
+		},
+		map[string]any{
+			"symbol_count": len(symbols),
+		},
+		3,
+	)
+	if err != nil {
+		log.Printf("[admin] failed enqueueing batch ingest job user_id=%s err=%v", user.UserID, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to enqueue job"})
+		return
+	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id":       job.ID,
@@ -144,8 +161,23 @@ func (h AdminHandler) BatchBackfillFeatures(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	job := h.JobManager.Create("batch_backfill_features", "Queued feature backfill job.")
-	go h.runBatchBackfillJob(job.ID, user.UserID, symbols)
+	job, err := h.JobManager.CreateWithPayload(
+		"batch_backfill_features",
+		"Queued feature backfill job.",
+		map[string]any{
+			"user_id": user.UserID,
+			"symbols": symbols,
+		},
+		map[string]any{
+			"symbol_count": len(symbols),
+		},
+		3,
+	)
+	if err != nil {
+		log.Printf("[admin] failed enqueueing feature backfill job user_id=%s err=%v", user.UserID, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to enqueue job"})
+		return
+	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"job_id":       job.ID,
@@ -210,79 +242,4 @@ func (h AdminHandler) resolveSymbols(ctx context.Context, requested []string) ([
 	}
 
 	return symbols, nil
-}
-
-func (h AdminHandler) runBatchIngestJob(jobID, userID string, symbols []string, days, delayMS int) {
-	h.JobManager.MarkRunning(jobID, "Historical ingest job is running.")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
-
-	type itemResult struct {
-		Symbol        string `json:"symbol"`
-		RowsProcessed int    `json:"rows_processed,omitempty"`
-		Error         string `json:"error,omitempty"`
-	}
-
-	results := make([]itemResult, 0, len(symbols))
-
-	for i, symbol := range symbols {
-		h.JobManager.UpdateMessage(jobID, "Processing "+symbol+" ("+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(symbols))+").")
-
-		rowsProcessed, err := h.PriceIngestionSV.IngestBySymbolForUser(ctx, userID, symbol, days)
-		if err != nil {
-			log.Printf("[batch-ingest] failed user_id=%s symbol=%s err=%v", userID, symbol, err)
-			results = append(results, itemResult{Symbol: symbol, Error: err.Error()})
-		} else {
-			results = append(results, itemResult{Symbol: symbol, RowsProcessed: rowsProcessed})
-		}
-
-		if i < len(symbols)-1 && delayMS > 0 {
-			select {
-			case <-ctx.Done():
-				h.JobManager.MarkFailed(jobID, "Historical ingest job timed out.", "batch ingest timed out")
-				return
-			case <-time.After(time.Duration(delayMS) * time.Millisecond):
-			}
-		}
-	}
-
-	h.JobManager.MarkCompleted(jobID, "Historical ingest job completed.", map[string]any{
-		"days":     days,
-		"delay_ms": delayMS,
-		"results":  results,
-	})
-}
-
-func (h AdminHandler) runBatchBackfillJob(jobID, userID string, symbols []string) {
-	h.JobManager.MarkRunning(jobID, "Feature backfill job is running.")
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
-
-	type itemResult struct {
-		Symbol        string `json:"symbol"`
-		RowsProcessed int    `json:"rows_processed,omitempty"`
-		Error         string `json:"error,omitempty"`
-	}
-
-	results := make([]itemResult, 0, len(symbols))
-
-	featureSV := services.FeatureEngineeringService{DB: h.DB}
-
-	for i, symbol := range symbols {
-		h.JobManager.UpdateMessage(jobID, "Generating features for "+symbol+" ("+strconv.Itoa(i+1)+"/"+strconv.Itoa(len(symbols))+").")
-
-		count, err := featureSV.BackfillBySymbol(ctx, symbol)
-		if err != nil {
-			log.Printf("[batch-backfill] failed user_id=%s symbol=%s err=%v", userID, symbol, err)
-			results = append(results, itemResult{Symbol: symbol, Error: err.Error()})
-		} else {
-			results = append(results, itemResult{Symbol: symbol, RowsProcessed: count})
-		}
-	}
-
-	h.JobManager.MarkCompleted(jobID, "Feature backfill job completed.", map[string]any{
-		"results": results,
-	})
 }
