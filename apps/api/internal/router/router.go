@@ -1,6 +1,7 @@
 package router
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -74,6 +75,7 @@ func New(cfg config.Config, db *pgxpool.Pool) http.Handler {
 		ProviderName:      providerName,
 	}
 	featureService := &services.FeatureEngineeringService{DB: db}
+	go jobs.NewWorker(jobManager, priceIngestionService, featureService).Start(context.Background())
 
 	authHandler := handlers.AuthHandler{DB: db, JWTManager: jwtManager}
 	tickerHandler := handlers.TickerHandler{DB: db, MLClient: ml}
